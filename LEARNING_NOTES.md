@@ -20,6 +20,8 @@
 13. [Stage 5: Comments, Internal Notes & Audit Trail](#13-stage-5-comments-internal-notes--audit-trail)
 14. [Stage 6: MongoDB Aggregation Pipelines, Metrics & Search Optimization](#14-stage-6-mongodb-aggregation-pipelines-metrics--search-optimization)
 15. [Stage 7: Database Seeding & Deterministic Test Environments](#15-stage-7-database-seeding--deterministic-test-environments)
+16. [Stage 8: Frontend Architecture, Design Tokens & In-Memory API Client Layer](#16-stage-8-frontend-architecture-design-tokens--in-memory-api-client-layer)
+17. [Stage 9: Frontend Authentication, State Management & Route Guards](#17-stage-9-frontend-authentication-state-management--route-guards)
 
 ---
 
@@ -1092,6 +1094,260 @@ Stage 7 implements an idempotent, automated database seeder (`npm run seed`):
      -d '{"email":"alice@example.com","password":"CustomerPassword123!"}'
    ```
    *Verify that you receive HTTP 200 with `role: "customer"` and can fetch Alice's tickets (`SUP-1001`, `SUP-1002`).*
+
+---
+
+## 16. Stage 8: Frontend Architecture, Design Tokens & In-Memory API Client Layer
+
+### 16.1 What this stage does and why it exists
+Building a portfolio-grade web application requires moving beyond default browser styling or unmaintainable inline styles. Stage 8 establishes the complete frontend foundation:
+1. **React 19 + Vite SPA Architecture**: Sub-second Hot Module Replacement (HMR) and optimized rollup production bundles.
+2. **Vanilla CSS Design System**: Comprehensive CSS variables (tokens) defining a sleek Slate/Indigo SaaS dark theme, glassmorphic cards, accessible focus rings, responsive drawer sidebars, and micro-animations without external framework bloat.
+3. **In-Memory API Client Layer**: Implements the architectural requirement that JWT access tokens live **only in memory** (`client/src/api/client.js`), ensuring zero web storage exposure.
+4. **401 Unauthorized Interceptor Hook**: Centralized HTTP client detects session invalidation and automatically triggers authentication resets.
+5. **Component Library Foundation**: Reusable `Button`, `StatusBadge`, `PriorityBadge`, `Alert`, `Spinner`, `Navbar`, `Sidebar`, and `AppLayout` components.
+
+---
+
+### 16.2 In-Memory Token Client Architecture
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor User as User / Component
+    participant React as React UI Component
+    participant Client as API Client (api/client.js)
+    participant Memory as In-Memory Token Variable
+    participant Backend as Express REST API
+
+    User->>React: Performs Action (e.g. Fetch Tickets)
+    React->>Client: ticketApi.getTickets()
+    Client->>Memory: getAuthToken()
+    Memory-->>Client: Returns JWT string (from RAM closure)
+    Client->>Backend: HTTP GET /api/tickets with Authorization: Bearer <jwt>
+    alt Token Valid
+        Backend-->>Client: HTTP 200 OK (Data payload)
+        Client-->>React: Resolves with tickets
+    else Token Expired or Invalid (401)
+        Backend-->>Client: HTTP 401 Unauthorized
+        Note over Client: Triggers registered unauthorizedHandler()
+        Client-->>React: Throws structured Error & prompts login
+    end
+```
+
+#### Why In-Memory Bearer Token Client (Interview Discussion):
+- **Immunity to Storage Scraping**: If any third-party script or dependency contains malicious code, it cannot call `localStorage.getItem('token')` because no token exists in browser web storage.
+- **Explicit Header Attachment**: Custom `Authorization: Bearer <token>` headers avoid automatic ambient transmission by the browser, rendering the app immune to Cross-Site Request Forgery (CSRF).
+- **Graceful Lifecycle Hooks**: The centralized `onUnauthorized()` listener decouples network transport from React state, allowing `AuthContext` to clear user sessions cleanly without polling.
+
+---
+
+### 16.3 CSS Design System Tokens (`client/src/index.css`)
+
+```css
+:root {
+  /* Surface colors */
+  --bg-app: #090d16;
+  --bg-surface: #0f172a;
+  --bg-card: rgba(15, 23, 42, 0.75);
+  --border-subtle: rgba(255, 255, 255, 0.08);
+
+  /* Primary Brand */
+  --primary: #6366f1;
+  --primary-gradient: linear-gradient(135deg, #6366f1 0%, #8b5cf6 50%, #d946ef 100%);
+  --primary-glow: 0 0 24px rgba(99, 102, 241, 0.35);
+
+  /* Status Colors */
+  --status-open-text: #60a5fa;
+  --status-progress-text: #fbbf24;
+  --status-resolved-text: #34d399;
+  --status-closed-text: #94a3b8;
+}
+```
+
+---
+
+### 16.4 Key Files & Module Responsibilities in Stage 8
+
+| File Path | Responsibility |
+| :--- | :--- |
+| `client/index.html` | Entry HTML document with Google Fonts Inter typography preconnects and responsive viewport tags. |
+| `client/src/index.css` | Global design system: custom properties, glassmorphism, responsive utilities, custom scrollbar, buttons, badges, and animations. |
+| `client/src/api/client.js` | Centralized fetch wrapper managing in-memory token state, 401 error interception, and JSON error normalization. |
+| `client/src/api/authApi.js` | Authentication API calls: `login`, `register`, `getMe`. |
+| `client/src/api/ticketApi.js` | Ticket operations: `getTickets`, `getTicketById`, `createTicket`, `updateStatus`, `updatePriority`, `assignTicket`, `getComments`, `createComment`, `getActivity`. |
+| `client/src/api/dashboardApi.js` | Dashboard operations: `getMetrics`. |
+| `client/src/components/common/Button.jsx` | Polymorphic button with loading spinners, icon placement, and primary/secondary/danger/ghost variants. |
+| `client/src/components/common/StatusBadge.jsx` | Ticket status indicator pill with colored dot indicator. |
+| `client/src/components/common/PriorityBadge.jsx` | Ticket priority indicator pill. |
+| `client/src/components/common/Alert.jsx` | Feedback banner with icons for error, success, and info messages. |
+| `client/src/components/common/Spinner.jsx` | Centered loading spinner for async operations. |
+| `client/src/components/layout/Navbar.jsx` | Sticky header with brand logo, authenticated user badge, role indicator, and logout action. |
+| `client/src/components/layout/Sidebar.jsx` | Collapsible sidebar with role-tailored navigation items (Customer, Agent, Admin). |
+| `client/src/components/layout/AppLayout.jsx` | Main dashboard layout wrapper integrating Navbar, Sidebar, and reactive content view. |
+| `client/src/App.jsx` | Router setup and visual showcase verifying design tokens and components. |
+
+---
+
+### 16.5 Interview Questions & Detailed Answers
+
+#### Q1: Why use a centralized API client layer instead of calling `fetch()` directly in React components?
+> **Answer**:  
+> Calling raw `fetch()` directly in components couples UI logic to HTTP transport details. If the API base URL changes, or token attachment logic needs updating, or common error formatting is required, developers must modify dozens of components.  
+> A centralized client (`api/client.js`) encapsulates:
+> 1. Setting and attaching the in-memory `Authorization: Bearer <token>` header to all requests.
+> 2. Centralized error handling that parses backend error payloads and extracts validation error arrays.
+> 3. Global interceptors (such as catching `401 Unauthorized` responses to clear sessions upon token expiration).
+
+#### Q2: What are CSS Custom Properties (CSS variables) and why are they preferable to Sass/SCSS variables in modern web development?
+> **Answer**:  
+> Sass variables (`$primary-color`) are resolved at build-time by a compiler and compile to static values in the final CSS bundle. They have no awareness of the browser DOM and cannot be modified dynamically at runtime.  
+> CSS Custom Properties (`var(--primary)`) are dynamic, native browser variables that live in the DOM. They cascade down the document tree and can be updated instantly in JavaScript or media queries (e.g., toggling themes, dynamic brand colors, or adjusting spacing without rebuilding bundles).
+
+---
+
+### 16.6 Self-Study Hands-On Exercise (Stage 8)
+
+1. **Verify the Frontend Production Build**:
+   ```bash
+   cd client && npm run build
+   ```
+   *Verify that Vite bundles all assets in under 1 second without errors.*
+
+2. **Launch the Development Preview**:
+   ```bash
+   npm run dev
+   ```
+   *Open http://localhost:5173 in your browser and observe the clean SaaS dashboard layout, interactive buttons, glassmorphic cards, and status badges.*
+
+---
+
+## 17. Stage 9: Frontend Authentication, State Management & Route Guards
+
+### 17.1 What this stage does and why it exists
+Stage 9 bridges the client application to the backend's authentication system while strictly implementing our security principle: **In-Memory JWT Access Token Storage**.
+1. **React State RAM Storage**: Tokens are stored strictly in `AuthContext` state memory and an in-memory module closure (`api/client.js`). Tokens are never written to `localStorage` or `sessionStorage`.
+2. **Global Auth Hook (`useAuth`)**: Provides unified access to authentication state (`user`, `token`, `isAuthenticated`, `isLoading`, `authError`) and operations (`login`, `register`, `logout`).
+3. **Automated 401 Session Interceptor**: Centralized listener clears user session immediately if the backend signals token expiration or invalidation.
+4. **Declarative Route Protection (`ProtectedRoute`)**: Intercepts unauthenticated navigation, redirects to `/login` with `location.state.from` preserved for post-login return, and enforces role-based access control (RBAC).
+5. **Interactive SaaS Auth Pages**:
+   - `LoginPage`: Centered card with email/password inputs, error alerts, and one-click demo credentials for Admin, Agent, and Customer roles.
+   - `RegisterPage`: Public registration form enforcing the architectural rule that public signups strictly create `customer` accounts.
+   - `DashboardPage`: Initial authenticated landing page displaying profile metadata and live Bearer token API verification.
+
+---
+
+### 17.2 In-Memory Auth & Interceptor Lifecycle
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor User as User
+    participant Page as LoginPage / RegisterPage
+    participant Hook as useAuth() Hook
+    participant Ctx as AuthContext (RAM)
+    participant Client as api/client.js (Closure)
+    participant API as Express API (/api/auth)
+
+    User->>Page: Enters credentials & clicks Submit
+    Page->>Hook: login(email, password)
+    Hook->>API: POST /api/auth/login
+    API-->>Client: HTTP 200 { token, user: { id, name, role } }
+    Client->>Ctx: setUser(user), setToken(token)
+    Client->>Client: setAuthToken(token) in module RAM
+    Ctx-->>Page: State updated (isAuthenticated = true)
+    Page->>User: Navigate to /dashboard
+
+    Note over User,Client: User navigates or triggers action
+    Client->>API: GET /api/auth/me (Authorization: Bearer <token>)
+    alt Token Valid
+        API-->>Client: HTTP 200 OK
+    else Token Expired or Revoked
+        API-->>Client: HTTP 401 Unauthorized
+        Note over Client: Triggers onUnauthorized callback
+        Client->>Ctx: logout() (clears RAM state)
+        Ctx-->>User: ProtectedRoute redirects to /login
+    end
+```
+
+---
+
+### 17.3 Declarative Route Protection (`ProtectedRoute`)
+
+```jsx
+export function ProtectedRoute({ allowedRoles, children }) {
+  const { user, isAuthenticated, isLoading } = useAuth();
+  const location = useLocation();
+
+  if (isLoading) return <Spinner />;
+
+  // 1. Authentication check
+  if (!isAuthenticated) {
+    return <Navigate to="/login" state={{ from: location }} replace />;
+  }
+
+  // 2. Authorization check (RBAC)
+  if (allowedRoles && !allowedRoles.includes(user?.role)) {
+    return <AccessRestrictedView userRole={user?.role} allowed={allowedRoles} />;
+  }
+
+  return children ? children : <Outlet />;
+}
+```
+
+#### Why Preserve `location.state.from`?
+When an unauthenticated user attempts to visit a deep link (e.g. `/tickets/SUP-1002`), `ProtectedRoute` captures the current location in `state: { from: location }`. Upon successful login, `LoginPage` reads `location.state?.from?.pathname || '/dashboard'`, redirecting the user back to the exact ticket they intended to inspect.
+
+---
+
+### 17.4 Key Files & Module Responsibilities in Stage 9
+
+| File Path | Responsibility |
+| :--- | :--- |
+| `client/src/context/AuthContext.jsx` | In-memory token and user state container. Handles `login`, `register`, `logout`, and listens for 401 invalidation. |
+| `client/src/hooks/useAuth.js` | Custom hook exposing auth state and functions with boundary validation. |
+| `client/src/components/layout/ProtectedRoute.jsx` | Route guard that checks authentication and enforces role permissions before rendering protected views. |
+| `client/src/pages/auth/LoginPage.jsx` | SaaS login page with one-click demo credentials for Admin, Agent, and Customer roles. |
+| `client/src/pages/auth/RegisterPage.jsx` | Public registration page enforcing customer-only account creation. |
+| `client/src/pages/dashboard/DashboardPage.jsx` | Authenticated dashboard showing user profile, role permissions, and live Bearer token API verification. |
+| `client/src/App.jsx` | Root application component configuring `AuthProvider`, public auth routes, and protected application routes. |
+
+---
+
+### 17.5 Interview Questions & Detailed Answers
+
+#### Q1: Why store the JWT access token in React state memory rather than localStorage or sessionStorage, and what are the trade-offs?
+> **Answer**:  
+> **Security Advantage**: Storing tokens in `localStorage` or `sessionStorage` leaves them vulnerable to **Cross-Site Scripting (XSS)**. Any malicious script, unvetted npm package, or injected inline script can execute `localStorage.getItem('token')` and exfiltrate the user's credentials. With an in-memory approach, the token lives strictly in JavaScript closure memory and cannot be scraped via the `Storage` API.  
+> **Trade-off**: The primary drawback is that memory is volatile: refreshing the browser or opening a new tab clears the state, requiring re-authentication. In enterprise architectures, this is typically paired with an **HTTP-only, SameSite Refresh Token Cookie** that silently replenishes the in-memory access token without user friction. For our portfolio MVP, we explicitly chose and documented the in-memory requirement to highlight conscious security trade-offs.
+
+#### Q2: How does `ProtectedRoute` handle unauthorized navigation and preserve the user's intended destination?
+> **Answer**:  
+> When an unauthenticated request reaches `ProtectedRoute`, it uses React Router's `<Navigate>` component:
+> ```jsx
+> <Navigate to="/login" state={{ from: location }} replace />
+> ```
+> 1. It records the current `location` object in router state memory.
+> 2. It sets `replace: true` so the unauthorized URL does not pollute the browser's back-button history.
+> 3. After the user logs in, `LoginPage` checks `location.state?.from?.pathname || '/dashboard'` and seamlessly routes them to their intended destination.
+
+---
+
+### 17.6 Self-Study Hands-On Exercise (Stage 9)
+
+1. **Verify In-Memory Token Security in DevTools**:
+   - Open Chrome DevTools -> Application Tab -> **Local Storage** and **Session Storage**.
+   - Notice that both storage tables are completely empty after logging in!
+   - Refresh the page and confirm that memory resets and the application securely returns to `/login`.
+
+2. **Test One-Click Demo Credentials**:
+   - Visit `http://localhost:5173/login`.
+   - Click "Admin", then click "Sign In".
+   - Notice instant redirection to `/dashboard` displaying the Admin badge.
+   - Click "Verify Bearer Token API" to observe live 200 OK authorization against `GET /api/auth/me`.
+   - Click "Logout" and repeat with "Agent" and "Customer".
+
+
 
 
 
