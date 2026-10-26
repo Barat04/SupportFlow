@@ -63,8 +63,11 @@ app.get('/api/health', (req, res) => {
 // 6. Application Routes
 const authRoutes = require('./routes/authRoutes');
 const ticketRoutes = require('./routes/ticketRoutes');
+const dashboardRoutes = require('./routes/dashboardRoutes');
+
 app.use('/api/auth', authRoutes);
 app.use('/api/tickets', ticketRoutes);
+app.use('/api/dashboard', dashboardRoutes);
 // app.use('/api/users', userRoutes);
 
 // 7. 404 Handler for undefined routes

@@ -104,7 +104,19 @@ async function getTickets(queryParams, currentUser) {
   if (priority) filter.priority = priority;
   if (category) filter.category = category;
 
-  // 3. Keyword Search (ticketNumber, title, description)
+  // 3. Date Range Filter
+  const { startDate, endDate } = queryParams;
+  if (startDate || endDate) {
+    filter.createdAt = {};
+    if (startDate && !isNaN(Date.parse(startDate))) {
+      filter.createdAt.$gte = new Date(startDate);
+    }
+    if (endDate && !isNaN(Date.parse(endDate))) {
+      filter.createdAt.$lte = new Date(endDate);
+    }
+  }
+
+  // 4. Keyword Search (ticketNumber, title, description)
   if (search && search.trim()) {
     const searchRegex = new RegExp(search.trim(), 'i');
     filter.$or = [
@@ -114,7 +126,17 @@ async function getTickets(queryParams, currentUser) {
     ];
   }
 
-  // 4. Pagination math
+  // 5. Allowed Sort Fields Whitelist
+  const allowedSorts = [
+    'createdAt', '-createdAt',
+    'updatedAt', '-updatedAt',
+    'priority', '-priority',
+    'status', '-status',
+    'ticketNumber', '-ticketNumber'
+  ];
+  const safeSort = allowedSorts.includes(sortBy) ? sortBy : '-createdAt';
+
+  // 6. Pagination math
   const pageNum = Math.max(1, parseInt(page, 10) || 1);
   const limitNum = Math.min(50, Math.max(1, parseInt(limit, 10) || 10));
   const skip = (pageNum - 1) * limitNum;
@@ -123,7 +145,7 @@ async function getTickets(queryParams, currentUser) {
     Ticket.find(filter)
       .populate('customer', 'name email role')
       .populate('assignedTo', 'name email role')
-      .sort(sortBy)
+      .sort(safeSort)
       .skip(skip)
       .limit(limitNum),
     Ticket.countDocuments(filter)

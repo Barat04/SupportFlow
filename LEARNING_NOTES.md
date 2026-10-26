@@ -18,6 +18,8 @@
 11. [Stage 3: Authentication, RBAC & User Security](#11-stage-3-authentication-rbac--user-security)
 12. [Stage 4: Ticket Model, Compound Indexes, State Machine & CRUD APIs](#12-stage-4-ticket-model-compound-indexes-state-machine--crud-apis)
 13. [Stage 5: Comments, Internal Notes & Audit Trail](#13-stage-5-comments-internal-notes--audit-trail)
+14. [Stage 6: MongoDB Aggregation Pipelines, Metrics & Search Optimization](#14-stage-6-mongodb-aggregation-pipelines-metrics--search-optimization)
+15. [Stage 7: Database Seeding & Deterministic Test Environments](#15-stage-7-database-seeding--deterministic-test-environments)
 
 ---
 
@@ -817,6 +819,281 @@ sequenceDiagram
      -H "Authorization: Bearer YOUR_AGENT_TOKEN"
    ```
    *Verify that you see the chronological timeline of actions: CREATED, STATUS_UPDATED, and COMMENT_ADDED.*
+
+---
+
+## 14. Stage 6: MongoDB Aggregation Pipelines, Metrics & Search Optimization
+
+### 14.1 What this stage does and why it exists
+Customer support dashboards require live, multifaceted metrics:
+- **Administrators** need global operational intelligence: total volume, status distribution, priority distribution, category breakdown, unassigned tickets, and tickets needing urgent attention.
+- **Support Agents** need immediate clarity on their personal queue (open, in-progress, urgent) contrasted against the unassigned pool.
+- **Customers** need an instant snapshot of their submitted tickets across statuses.
+
+Rather than querying `Ticket.countDocuments()` 8 to 10 separate times, we execute a single, high-performance **MongoDB `$facet` Aggregation Pipeline**. This reduces database connection overhead, eliminates network latency roundtrips, and provides a point-in-time consistent snapshot.
+
+---
+
+### 14.2 Aggregation Architecture: The `$facet` Stage
+
+```mermaid
+graph TD
+    subgraph Input["Input Collection (Tickets)"]
+        T[All Tickets matching User Scope]
+    end
+
+    subgraph Facet["$facet Stage: Multi-Pipeline Execution"]
+        F1["byStatus Pipeline: $group by $status"]
+        F2["byPriority Pipeline: $group by $priority"]
+        F3["byCategory Pipeline: $group by $category"]
+        F4["unassigned Pipeline: $match assignedTo == null & status != closed"]
+        F5["urgentAttention Pipeline: $match priority in (high, urgent) & status in (open, in_prog)"]
+        F6["total Pipeline: $count"]
+    end
+
+    subgraph Normalizer["Application Service Layer"]
+        N[normalizeCounts: Zero-Padded Key-Value Maps]
+    end
+
+    subgraph Output["Output JSON"]
+        O[Clean JSON Payload with Overview, byStatus, byPriority, byCategory]
+    end
+
+    T --> F1
+    T --> F2
+    T --> F3
+    T --> F4
+    T --> F5
+    T --> F6
+    F1 --> N
+    F2 --> N
+    F3 --> N
+    F4 --> N
+    F5 --> N
+    F6 --> N
+    N --> O
+```
+
+#### Why `$facet` is an Essential Interview Discussion Point:
+1. **Network Efficiency**: Reduces 8+ TCP round trips between Express and MongoDB down to a **single query**.
+2. **Snapshot Consistency**: When running multiple independent count queries concurrently, tickets modified between queries cause count mismatches (e.g., total != sum of statuses). A single aggregation pipeline operates on a consistent point-in-time snapshot of the database state.
+3. **Server Workload Reduction**: MongoDB's query optimizer evaluates facets concurrently and leverages compound indexes efficiently.
+
+---
+
+### 14.3 Request Flow: Dashboard Metrics
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Client as Admin Client (React / curl)
+    participant Route as Express Router (/api/dashboard/metrics)
+    participant AuthMW as authenticate Middleware
+    participant Controller as dashboardController.js
+    participant Service as dashboardService.js
+    participant DB as MongoDB Aggregation Engine
+
+    Client->>Route: GET /api/dashboard/metrics
+    Route->>AuthMW: Verify Bearer JWT
+    AuthMW-->>Route: req.user (role: admin)
+    Route->>Controller: getMetrics(req, res, next)
+    Controller->>Service: getDashboardMetrics(req.user)
+    Service->>DB: Ticket.aggregate([ { $facet: { ... } } ])
+    DB-->>Service: Raw faceted arrays [{ byStatus: [...], byPriority: [...], total: [...] }]
+    Note over Service: Normalizes arrays into zero-padded JSON maps
+    Service-->>Controller: { role: "admin", overview: {...}, byStatus: {...}, ... }
+    Controller-->>Client: HTTP 200 OK (Clean Metrics JSON)
+```
+
+---
+
+### 14.4 Advanced Search, Filtering & Sorting
+
+In `ticketService.getTickets`, we engineered production-grade query building:
+1. **Multi-Field Text Search**:
+   ```javascript
+   if (search && search.trim()) {
+     const searchRegex = new RegExp(search.trim(), 'i');
+     filter.$or = [
+       { ticketNumber: searchRegex },
+       { title: searchRegex },
+       { description: searchRegex }
+     ];
+   }
+   ```
+2. **Date Range Filtering**: Supports `startDate` and `endDate` parameters with date validation (`!isNaN(Date.parse(date))`).
+3. **Sort Whitelist Guard**: Prevents SQL/NoSQL injection and runtime errors by whitelisting permitted sort keys (`createdAt`, `-createdAt`, `updatedAt`, `priority`, `status`, `ticketNumber`). Unrecognized sort parameters safely fall back to `-createdAt`.
+4. **Bounded Pagination**: `limit` is clamped to a maximum of 50 to prevent Denial-of-Service memory exhaustion attacks from malicious requests like `?limit=1000000`.
+
+---
+
+### 14.5 API Reference: Dashboard & Search
+
+#### 1. `GET /api/dashboard/metrics`
+- **Access**: Authenticated (Tailored by role)
+- **Admin Response (`200 OK`)**:
+```json
+{
+  "success": true,
+  "metrics": {
+    "role": "admin",
+    "overview": {
+      "total": 5,
+      "open": 2,
+      "inProgress": 1,
+      "resolved": 1,
+      "closed": 1,
+      "unassigned": 2,
+      "needsAttention": 2
+    },
+    "byStatus": {
+      "open": 2,
+      "in_progress": 1,
+      "resolved": 1,
+      "closed": 1
+    },
+    "byPriority": {
+      "low": 2,
+      "medium": 1,
+      "high": 1,
+      "urgent": 1
+    },
+    "byCategory": {
+      "technical": 2,
+      "billing": 1,
+      "account": 1,
+      "general": 1
+    }
+  }
+}
+```
+
+#### 2. `GET /api/tickets` (Enhanced Search & Filter Query Parameters)
+- `search`: Keyword searched across `ticketNumber`, `title`, and `description`.
+- `status`: Filter by `open`, `in_progress`, `resolved`, `closed`.
+- `priority`: Filter by `low`, `medium`, `high`, `urgent`.
+- `category`: Filter by `technical`, `billing`, `account`, `general`.
+- `startDate`: ISO date string (e.g., `2026-10-01`).
+- `endDate`: ISO date string (e.g., `2026-10-31`).
+- `sortBy`: `createdAt`, `-createdAt`, `priority`, `-priority`, `status`, `ticketNumber`.
+- `page`: Page index (1-indexed).
+- `limit`: Items per page (default: 10, max: 50).
+
+---
+
+### 14.6 Interview Questions & Detailed Answers
+
+#### Q1: What is the `$facet` stage in MongoDB Aggregation, and why is it preferred over running multiple queries?
+> **Answer**:  
+> The `$facet` stage allows processing multiple aggregation sub-pipelines concurrently within a single aggregation query on the same input document set.  
+> Without `$facet`, gathering dashboard counts requires executing 6 to 10 distinct queries (e.g. counting by status, counting by priority, counting unassigned). Each query involves a separate network roundtrip and database overhead. Furthermore, executing multiple queries sequentially can result in inconsistent data if documents are written in between queries. `$facet` ensures a single roundtrip and executes against a consistent point-in-time database snapshot.
+
+#### Q2: How does SupportFlow protect against Denial of Service (DoS) attacks on search and pagination endpoints?
+> **Answer**:  
+> In `ticketService.getTickets()`, we apply two defensive constraints:
+> 1. **Limit Clamping**: We clamp the page limit via `Math.min(50, Math.max(1, limit))`. If an attacker requests `?limit=10000000`, the server strictly limits the result set to 50 documents, preventing memory exhaustion and database lockups.
+> 2. **Sort Whitelist**: Unsanitized sort parameters like `?sortBy=secretField` can expose internal fields or trigger expensive unindexed disk sorts. We check the sort key against an explicit whitelist of pre-indexed fields, safely falling back to `-createdAt` if an unknown field is requested.
+
+---
+
+### 14.7 Self-Study Hands-On Exercise (Stage 6)
+
+1. **Query Live Dashboard Metrics**:
+   Log in as an admin or agent and query the metrics endpoint:
+   ```bash
+   curl -X GET http://localhost:5000/api/dashboard/metrics \
+     -H "Authorization: Bearer YOUR_TOKEN"
+   ```
+   *Verify that you receive accurate, zero-padded count distributions.*
+
+2. **Execute a Multi-Condition Filter Search**:
+   Query tickets with a search keyword and priority filter:
+   ```bash
+   curl -X GET "http://localhost:5000/api/tickets?search=billing&priority=high&sortBy=-createdAt" \
+     -H "Authorization: Bearer YOUR_TOKEN"
+   ```
+   *Verify that the response returns the matching tickets with pagination metadata.*
+
+---
+
+## 15. Stage 7: Database Seeding & Deterministic Test Environments
+
+### 15.1 What this stage does and why it exists
+During frontend development, manual QA, and portfolio demonstrations, manually creating 10 accounts and simulating complex ticket conversations is slow, error-prone, and inconsistent.
+
+Stage 7 implements an idempotent, automated database seeder (`npm run seed`):
+1. **Clean-Slate Reset**: Wipes existing collections (`users`, `tickets`, `comments`, `counters`, `auditlogs`) to prevent stale, conflicting state.
+2. **Authorized Privilege Bootstrap**: Because public registration strictly assigns `role: 'customer'`, the seeder is the secure local bootstrap mechanism that creates the initial Administrator and Support Agents.
+3. **Realistic Conversation Lifecycles**: Seeds tickets representing real-world enterprise scenarios across every status and priority, complete with public replies, confidential internal notes, and chronological audit records.
+4. **Counter Synchronization**: Atomically updates the `Counter` collection to `seq: 5` so the very next ticket created via the API or frontend naturally receives `SUP-1006`.
+
+---
+
+### 15.2 Seed Accounts & Credentials
+
+| Role | Name | Email | Password | Primary Purpose in Demos |
+| :--- | :--- | :--- | :--- | :--- |
+| **Admin** | System Administrator | `admin@supportflow.com` | `AdminPassword123!` | Global dashboard metrics, triage, ticket reassignment, reopening closed tickets. |
+| **Agent** | Sarah Connor | `agent.sarah@supportflow.com` | `AgentPassword123!` | Active assigned queue, replying to customers, posting private internal notes. |
+| **Agent** | Alex Murphy | `agent.alex@supportflow.com` | `AgentPassword123!` | Triage, claiming unassigned tickets, resolving technical issues. |
+| **Customer** | Alice Freeman | `alice@example.com` | `CustomerPassword123!` | Submitting tickets, viewing personal ticket list, public conversations. |
+| **Customer** | Bob Vance | `bob@example.com` | `CustomerPassword123!` | Account management requests, closing own resolved tickets. |
+| **Customer** | Charlie Day | `charlie@example.com` | `CustomerPassword123!` | General queries, testing customer privacy isolation. |
+
+---
+
+### 15.3 Seeded Ticket Matrix
+
+| Ticket # | Title | Category | Priority | Status | Creator | Assignee | Seeded Artifacts |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **SUP-1001** | Database latency spikes | Technical | Urgent | Open | Alice Freeman | *Unassigned* | Audit log (Created) |
+| **SUP-1002** | Double billing on Enterprise | Billing | High | In Progress | Alice Freeman | Sarah Connor | Public reply, **Private Internal Note**, Audit trail |
+| **SUP-1003** | Primary email transfer | Account | Medium | Resolved | Bob Vance | Alex Murphy | 2 Public conversation comments, Status updated audit |
+| **SUP-1004** | Webhook retry policies | General | Low | Closed | Charlie Day | Sarah Connor | Full lifecycle audit trail |
+| **SUP-1005** | SSO SAML login loop | Technical | High | Open | Bob Vance | *Unassigned* | Unassigned queue triage candidate |
+
+---
+
+### 15.4 Interview Questions & Detailed Answers
+
+#### Q1: Why is idempotence essential in database seeding scripts?
+> **Answer**:  
+> In development and automated testing, seed scripts are executed repeatedly (e.g. before integration test runs, during onboarding, or after resetting a staging database). An idempotent script can be run $N$ times and always results in the exact same clean database state.  
+> Without clean-slate wipes (`deleteMany({})`), re-running a seed script crashes with MongoDB `E11000 duplicate key error` on unique indexes (such as user emails or `ticketNumber`), or causes record duplication that skews metrics and tests.
+
+#### Q2: How does the seed script interact with Mongoose pre-save hooks?
+> **Answer**:  
+> In `server/src/scripts/seed.js`, we seed users using `User.create(SEED_USERS)`. In Mongoose, `Model.create()` instantiates each document and triggers Mongoose `pre('save')` middleware hooks.  
+> As a result, the plain-text passwords provided in the seed configuration are salted and hashed through our 12-round **Bcrypt** algorithm. We never bypass schema hooks with raw database drivers (`db.collection.insertMany`), ensuring test users have cryptographically authentic password hashes identical to live registered users.
+
+---
+
+### 15.5 Self-Study Hands-On Exercise (Stage 7)
+
+1. **Run the Database Seed Script**:
+   Ensure MongoDB is running, then execute:
+   ```bash
+   cd server && npm run seed
+   ```
+   *Observe the formatted terminal output displaying the seed accounts table and confirmation of created tickets.*
+
+2. **Log In with the Seeded Administrator**:
+   ```bash
+   curl -X POST http://localhost:5000/api/auth/login \
+     -H "Content-Type: application/json" \
+     -d '{"email":"admin@supportflow.com","password":"AdminPassword123!"}'
+   ```
+   *Verify that you receive HTTP 200 with `role: "admin"`.*
+
+3. **Log In with Customer Alice**:
+   ```bash
+   curl -X POST http://localhost:5000/api/auth/login \
+     -H "Content-Type: application/json" \
+     -d '{"email":"alice@example.com","password":"CustomerPassword123!"}'
+   ```
+   *Verify that you receive HTTP 200 with `role: "customer"` and can fetch Alice's tickets (`SUP-1001`, `SUP-1002`).*
+
+
 
 
 
