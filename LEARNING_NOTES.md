@@ -22,6 +22,7 @@
 15. [Stage 7: Database Seeding & Deterministic Test Environments](#15-stage-7-database-seeding--deterministic-test-environments)
 16. [Stage 8: Frontend Architecture, Design Tokens & In-Memory API Client Layer](#16-stage-8-frontend-architecture-design-tokens--in-memory-api-client-layer)
 17. [Stage 9: Frontend Authentication, State Management & Route Guards](#17-stage-9-frontend-authentication-state-management--route-guards)
+18. [Stage 10: Customer Experience — Ticket Creation, Scoped Queue & Public Conversation Thread](#18-stage-10-customer-experience--ticket-creation-scoped-queue--public-conversation-thread)
 
 ---
 
@@ -1346,6 +1347,125 @@ When an unauthenticated user attempts to visit a deep link (e.g. `/tickets/SUP-1
    - Notice instant redirection to `/dashboard` displaying the Admin badge.
    - Click "Verify Bearer Token API" to observe live 200 OK authorization against `GET /api/auth/me`.
    - Click "Logout" and repeat with "Agent" and "Customer".
+
+---
+
+## 18. Stage 10: Customer Experience — Ticket Creation, Scoped Queue & Public Conversation Thread
+
+### 18.1 What this stage does and why it exists
+Stage 10 delivers the end-to-end customer workflow for SupportFlow. In a real-world enterprise support platform (like Zendesk, Linear, or Jira Service Management), customers must have an intuitive, fast, and transparent interface to:
+1. **Submit Tickets (`NewTicketPage`)**: Capture title, category, priority, and rich problem descriptions with client-side boundary checks and validation alerts.
+2. **Review Their Queue (`TicketListPage`)**: View their own tickets with live status indicators, priority badges, keyword search, filter dropdowns, and server-side pagination.
+3. **Collaborate on Issues (`TicketDetailPage`)**: Inspect their ticket history, view agent responses in chronological order, submit additional replies, and mark resolved tickets as `closed`.
+4. **Maintain Absolute Privacy Boundaries**: The interface reflects the server-enforced internal note boundary: customers cannot see or submit internal notes.
+
+---
+
+### 18.2 Complete Customer Journey Sequence Diagram
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Customer as Customer (Alice)
+    participant UI as React UI (Ticket Pages)
+    participant Client as api/client.js (In-Memory Bearer)
+    participant Backend as Express REST API
+    participant DB as MongoDB Atlas / Local
+
+    Customer->>UI: Submits New Ticket (Title, Category, Priority, Desc)
+    UI->>Client: ticketApi.createTicket(payload)
+    Client->>Backend: POST /api/tickets (Authorization: Bearer <jwt>)
+    Note over Backend: Counter generates atomic sequence SUP-1006
+    Backend->>DB: Saves Ticket document (status: open, customer: user._id)
+    Backend-->>UI: HTTP 201 Created { ticket: { ticketNumber: 'SUP-1006' } }
+    UI->>Customer: Redirects to /tickets/:id with success notification
+
+    Customer->>UI: Types reply in Conversation Thread
+    UI->>Client: ticketApi.createComment(ticketId, { message })
+    Client->>Backend: POST /api/tickets/:id/comments
+    Note over Backend: Verifies customer ownership & rejects isInternal attempts
+    Backend->>DB: Saves Comment (isInternal: false)
+    Backend-->>UI: HTTP 201 Created { comment }
+    UI->>Customer: Appends reply to conversation thread
+
+    Customer->>UI: Clicks "Mark Ticket as Closed" & confirms inline
+    UI->>Client: ticketApi.updateStatus(ticketId, 'closed')
+    Client->>Backend: PATCH /api/tickets/:id/status { status: 'closed' }
+    Note over Backend: State machine verifies open -> closed transition
+    Backend->>DB: Updates ticket.status = 'closed' + logs audit record
+    Backend-->>UI: HTTP 200 OK { ticket }
+    UI->>Customer: Updates status badge to CLOSED
+```
+
+---
+
+### 18.3 Server-Side Privacy Guarantee (Defense-in-Depth for Internal Notes)
+
+```mermaid
+graph TD
+    Request[Incoming Request from Client] --> AuthCheck[1. JWT Authentication Middleware]
+    AuthCheck --> RoleExtract[Extract user.role from decoded token]
+    RoleExtract --> RouteHandler[Ticket / Comment Controller]
+    
+    RouteHandler --> IsCustomer{Is role == 'customer'?}
+    IsCustomer -->|Yes: Create Comment| DenyInternal[Reject if isInternal == true with 403 Forbidden]
+    IsCustomer -->|Yes: Query Comments| HardFilter[Unconditional DB Filter: { isInternal: false }]
+    IsCustomer -->|No: Agent / Admin| AllowStaff[Allow isInternal toggles & return all notes]
+```
+
+- **Zero Trust on Client Input**: Even if a customer uses Postman, cURL, or modifies React state to send `{ "isInternal": true }`, the backend middleware rejects the payload with HTTP 403 Forbidden.
+- **Unconditional Query Isolation**: `commentService.getComments()` adds `{ isInternal: false }` to the Mongoose query for any user whose role is `customer`. Private staff notes never leave the database server.
+
+---
+
+### 18.4 Key Files & Module Responsibilities in Stage 10
+
+| File Path | Responsibility |
+| :--- | :--- |
+| `client/src/pages/tickets/NewTicketPage.jsx` | Ticket submission form with character limits, category options, urgency selector, and validation error banner. |
+| `client/src/pages/tickets/TicketListPage.jsx` | Scoped ticket table with keyword search, category/priority/status filters, sort controls, and pagination. |
+| `client/src/pages/tickets/TicketDetailPage.jsx` | Full ticket view with original issue card, chronological conversation thread, reply form, inline ticket close confirmation, and metadata sidebar. |
+| `client/src/App.jsx` | Wired application routes `/tickets`, `/tickets/new`, and `/tickets/:id` under `ProtectedRoute`. |
+| `client/src/index.css` | Enhanced with data table styles (`.table`, `.table-container`), category badge styles (`.badge-category`), and conversation cards (`.comment-card`, `.comment-card-internal`). |
+
+---
+
+### 18.5 Interview Questions & Detailed Answers
+
+#### Q1: How does the application ensure customers cannot view or submit private internal notes even if they manipulate client-side code or HTTP requests?
+> **Answer**:  
+> In modern web security, client-side UI hiding is strictly a presentation convenience, not a security boundary. We enforce a **4-layer server defense**:
+> 1. **Authentication Layer**: Verifies the cryptographically signed JWT and attaches `req.user` with their tamper-proof database role.
+> 2. **Authorization Layer (`createComment`)**: Before creating a comment, the service checks if `req.user.role === 'customer'` and `isInternal === true`. If so, it immediately throws a `ForbiddenError` (HTTP 403).
+> 3. **Query Filtering (`getComments`)**: When retrieving comments, the Mongoose query unconditionally appends `{ isInternal: false }` whenever the requester is a customer.
+> 4. **Audit Trail Masking**: The audit service unconditionally filters out audit records associated with internal notes when serving activity timelines to customers.
+
+#### Q2: Why did we replace `window.confirm()` with an inline confirmation bar for destructive or terminal actions like closing a ticket?
+> **Answer**:  
+> Native browser dialogs (`window.alert`, `window.confirm`) have several severe drawbacks in production single-page applications:
+> 1. **Thread Blocking**: Native modals block the JavaScript main event loop, preventing animations, async polling, and reactive updates from executing until dismissed.
+> 2. **Unstylable & Inaccessible**: Native dialogs cannot be themed to match our dark SaaS design system, and their accessibility attributes vary across browsers and mobile webviews.
+> 3. **Testing / Headless Automation Failures**: Automated test runners (like Playwright, Cypress, or Puppeteer) often auto-dismiss or hang on unhandled native dialogs.
+> By implementing an **inline confirmation bar** in React state (`showCloseConfirm`), the UI remains fully within the virtual DOM, styled consistently, accessible to keyboard navigation, and 100% deterministic in automated testing.
+
+---
+
+### 18.6 Self-Study Hands-On Exercise (Stage 10)
+
+1. **Verify Customer Ticket Creation & Sequential Key**:
+   - Log in as customer Alice (`alice@example.com` / `CustomerPassword123!`).
+   - Click "New Ticket", fill in title and description, and submit.
+   - Verify that the sequential ticket key (e.g. `SUP-1006`) is assigned atomically and displayed in the breadcrumb header.
+
+2. **Verify Public Conversation Thread**:
+   - On the created ticket, post a reply in the conversation box.
+   - Confirm that the message appears instantly in the conversation timeline with your name and role pill.
+   - Confirm there is NO internal note checkbox visible to customers.
+
+3. **Verify Inline Ticket Closure**:
+   - Click "Mark Ticket as Closed".
+   - Notice the inline confirmation bar appear: `Close this ticket? [Yes, Close] [Cancel]`.
+   - Click "Yes, Close" and verify that the status updates to `Closed` with an informative notification alert.
 
 
 

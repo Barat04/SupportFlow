@@ -6,6 +6,9 @@ import { AppLayout } from './components/layout/AppLayout';
 import { LoginPage } from './pages/auth/LoginPage';
 import { RegisterPage } from './pages/auth/RegisterPage';
 import { DashboardPage } from './pages/dashboard/DashboardPage';
+import { TicketListPage } from './pages/tickets/TicketListPage';
+import { NewTicketPage } from './pages/tickets/NewTicketPage';
+import { TicketDetailPage } from './pages/tickets/TicketDetailPage';
 
 export default function App() {
   return (
@@ -21,8 +24,9 @@ export default function App() {
             <Route element={<AppLayout />}>
               <Route path="/" element={<Navigate to="/dashboard" replace />} />
               <Route path="/dashboard" element={<DashboardPage />} />
-              <Route path="/tickets" element={<DashboardPage />} />
-              <Route path="/tickets/new" element={<DashboardPage />} />
+              <Route path="/tickets" element={<TicketListPage />} />
+              <Route path="/tickets/new" element={<NewTicketPage />} />
+              <Route path="/tickets/:id" element={<TicketDetailPage />} />
             </Route>
           </Route>
 
