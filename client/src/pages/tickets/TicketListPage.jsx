@@ -51,7 +51,7 @@ export function TicketListPage() {
         priority: priority || undefined,
         category: category || undefined,
         sortBy: sortBy || undefined,
-        assignedTo: assignedTo === 'me' ? user?.id : (assignedTo || undefined)
+        assignedTo: assignedTo || undefined
       };
 
       const res = await ticketApi.getTickets(query);
@@ -82,6 +82,15 @@ export function TicketListPage() {
       updated.set('page', '1');
     }
     setSearchParams(updated);
+  };
+
+  const handleClaimTicket = async (ticketId) => {
+    try {
+      await ticketApi.assignTicket(ticketId, user?.id);
+      fetchTickets();
+    } catch (err) {
+      setErrorMsg(err.message || 'Failed to claim ticket.');
+    }
   };
 
   const handleResetFilters = () => {
@@ -218,6 +227,21 @@ export function TicketListPage() {
               <option value="status">Status</option>
             </select>
           </div>
+
+          {/* Assignment Filter for Staff */}
+          {!isCustomer && (
+            <div>
+              <select
+                className="form-select"
+                value={assignedTo}
+                onChange={(e) => updateFilters({ assignedTo: e.target.value })}
+              >
+                <option value="">All Assignment States</option>
+                <option value="me">Assigned to Me</option>
+                <option value="unassigned">Unassigned Only</option>
+              </select>
+            </div>
+          )}
 
           {/* Reset button */}
           {hasActiveFilters && (
@@ -364,7 +388,16 @@ export function TicketListPage() {
                   </td>
 
                   {/* Action */}
-                  <td style={{ textAlign: 'right' }}>
+                  <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
+                    {user?.role === 'agent' && !t.assignedTo && t.status !== 'closed' && (
+                      <Button
+                        variant="secondary"
+                        onClick={() => handleClaimTicket(t.id || t._id)}
+                        style={{ padding: '0.3rem 0.55rem', fontSize: '0.78rem', marginRight: '0.4rem' }}
+                      >
+                        Claim
+                      </Button>
+                    )}
                     <Link to={`/tickets/${t.id || t._id}`} style={{ textDecoration: 'none' }}>
                       <Button variant="ghost" style={{ padding: '0.35rem 0.6rem', fontSize: '0.8rem' }}>
                         View

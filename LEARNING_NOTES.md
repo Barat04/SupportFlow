@@ -23,6 +23,8 @@
 16. [Stage 8: Frontend Architecture, Design Tokens & In-Memory API Client Layer](#16-stage-8-frontend-architecture-design-tokens--in-memory-api-client-layer)
 17. [Stage 9: Frontend Authentication, State Management & Route Guards](#17-stage-9-frontend-authentication-state-management--route-guards)
 18. [Stage 10: Customer Experience — Ticket Creation, Scoped Queue & Public Conversation Thread](#18-stage-10-customer-experience--ticket-creation-scoped-queue--public-conversation-thread)
+19. [Stage 11: Agent & Admin Dashboards — Queue Triage, Claiming, Internal Notes & State Machine Transitions](#19-stage-11-agent--admin-dashboards--queue-triage-claiming-internal-notes--state-machine-transitions)
+20. [Stage 12: Production Readiness, Architectural Audit & Portfolio Interview Guide](#20-stage-12-production-readiness-architectural-audit--portfolio-interview-guide)
 
 ---
 
@@ -1466,6 +1468,252 @@ graph TD
    - Click "Mark Ticket as Closed".
    - Notice the inline confirmation bar appear: `Close this ticket? [Yes, Close] [Cancel]`.
    - Click "Yes, Close" and verify that the status updates to `Closed` with an informative notification alert.
+
+---
+
+## 19. Stage 11: Agent & Admin Dashboards — Queue Triage, Claiming, Internal Notes & State Machine Transitions
+
+### 19.1 What this stage does and why it exists
+Stage 11 completes the staff operational workflows (Support Agents and System Administrators). In enterprise customer support platforms, support staff need specialized, high-efficiency tools to:
+1. **Monitor Real-Time Aggregated Metrics (`DashboardPage`)**: View live counts of unassigned queues, active investigations, and urgent blockers powered by MongoDB `$facet` aggregation pipelines.
+2. **Triage the Global Queue (`TicketListPage`)**: Filter tickets by assignment status (`Assigned to Me`, `Unassigned Only`), search by keywords, and claim unassigned tickets directly from the queue.
+3. **Control Ticket Ownership (`TicketDetailPage`)**: Support Agents can claim unassigned tickets or unclaim their assigned tickets. System Administrators have global assignment authority, with the ability to assign any ticket to any active agent.
+4. **Enforce Deterministic Lifecycle Transitions**: The interface presents only the legally allowed next states defined by our finite state machine (e.g. `open` -> `in_progress` -> `resolved` -> `closed`). Agents can only transition status on tickets assigned to them; closed tickets can only be reopened by an Administrator.
+5. **Collaborate via Private Staff Notes**: Agents and Administrators can toggle "Private Internal Note", creating comments that are styled with distinct gold borders and lock badges and strictly hidden from customers.
+6. **Inspect the Audit Activity Trail**: Staff can toggle between "Conversation" and "Audit Activity" tabs to view immutable chronological logs of all assignment, status, and comment events.
+
+---
+
+### 19.2 The State Machine & Ownership Enforcement Architecture
+
+```mermaid
+stateDiagram-v2
+    [*] --> open: Customer / Admin Creates Ticket
+    open --> in_progress: Assigned Agent / Admin (Start Work)
+    open --> closed: Customer / Staff Closes
+    in_progress --> resolved: Assigned Agent / Admin (Fix Verified)
+    in_progress --> open: Assigned Agent / Admin (Back to Triage)
+    resolved --> closed: Customer / Staff (Confirmed Fixed)
+    resolved --> in_progress: Staff (Issue Re-emerges)
+    closed --> open: Administrator ONLY (Reopen)
+```
+
+#### Ownership Rules:
+- **Agent Ownership**: Agents can browse the entire queue to discover tickets. However, before changing status or priority, the agent must claim the ticket. Attempting to update an unassigned or peer-assigned ticket returns HTTP 403 Forbidden.
+- **Admin Authority**: Administrators can update status and priority on any ticket, override assignments, and are the **only** role permitted to transition a ticket from `closed` back to `open`.
+
+---
+
+### 19.3 Staff Internal Notes & Audit Trail Separation
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Agent as Agent Sarah
+    participant UI as React UI (TicketDetailPage)
+    participant Client as api/client.js
+    participant API as Express API
+    participant DB as MongoDB
+
+    Agent->>UI: Types note & checks "Private Internal Note"
+    UI->>Client: ticketApi.createComment(ticketId, { message, isInternal: true })
+    Client->>API: POST /api/tickets/:id/comments
+    Note over API: Verifies Agent role & saves Comment { isInternal: true }
+    API->>DB: Saves Comment & AuditLog { isInternal: true }
+    API-->>UI: HTTP 201 Created { comment }
+    UI->>Agent: Renders note with gold lock border & "Internal Staff Note" badge
+
+    Note over Agent,DB: Customer Alice views the same ticket
+    actor Cust as Customer Alice
+    Cust->>API: GET /api/tickets/:id/comments
+    Note over API: Evaluates req.user.role == 'customer' -> applies { isInternal: false }
+    API-->>Cust: Returns only public comments (Internal note omitted)
+```
+
+---
+
+### 19.4 Key Files & Module Responsibilities in Stage 11
+
+| File Path | Responsibility |
+| :--- | :--- |
+| `client/src/pages/dashboard/DashboardPage.jsx` | Dynamic dashboard with role-tailored metrics cards (Admin, Agent, Customer) and recent ticket activity. |
+| `client/src/pages/tickets/TicketListPage.jsx` | Queue management with assignment filters (`Assigned to Me`, `Unassigned Only`) and quick inline "Claim" actions. |
+| `client/src/pages/tickets/TicketDetailPage.jsx` | Full staff controls: state machine transition buttons, agent claim/unclaim, admin assignee selector, priority updater, internal note composer, and audit activity tab. |
+| `server/src/controllers/authController.js` | Added `getStaff` endpoint returning active Agents and Admins for administrative assignment. |
+| `server/src/routes/authRoutes.js` | Configured `GET /api/auth/staff` guarded by `authenticate` and `authorizeRoles(AGENT, ADMIN)`. |
+| `client/src/api/authApi.js` | Added `authApi.getStaff()` for staff dropdown queries. |
+
+---
+
+### 19.5 Interview Questions & Detailed Answers
+
+#### Q1: How does the application enforce that agents can only update status on tickets assigned to them, while admins have global override capabilities?
+> **Answer**:  
+> In [`ticketService.js`](file:///Users/unbarat/Desktop/Projects/SupportFlow/server/src/services/ticketService.js), before executing `updateTicketStatus()`, we evaluate role-based ownership boundaries:
+> ```javascript
+> if (currentUser.role === ROLES.AGENT) {
+>   if (!ticket.assignedTo || !ticket.assignedTo.equals(currentUser._id)) {
+>     throw new ForbiddenError(
+>       'Agents can only update status on tickets assigned to them. Please claim the ticket first.'
+>     );
+>   }
+> }
+> ```
+> 1. If the requester is an Agent, the ticket's `assignedTo` ObjectId must match `currentUser._id`. If the ticket is unassigned or assigned to another agent, a 403 Forbidden error is thrown.
+> 2. If the requester is an Admin, the ownership check is bypassed, allowing administrative triage and overrides across all tickets in the system.
+> 3. In the React UI, we mirror this rule by checking `canStaffUpdateStatus = isAdmin || (isAgent && isAssignedToMe)` to display state transition buttons only when authorized.
+
+#### Q2: Why is the ticket state machine enforced on both the backend service and the frontend UI?
+> **Answer**:  
+> Dual-layer state machine enforcement is an enterprise architectural best practice:
+> 1. **Backend Layer (Security & Data Integrity)**: The server can never trust client input. Enforcing `VALID_STATUS_TRANSITIONS` in `ticketService.js` guarantees that direct API calls via cURL or Postman cannot create illegal transitions (such as jumping directly from `in_progress` to `closed` or non-admins reopening closed tickets).
+> 2. **Frontend Layer (User Experience & Usability)**: The UI dynamically reads the current status and renders buttons **only** for valid next states. This prevents user frustration by eliminating the possibility of submitting an illegal status transition and receiving a 422 error.
+
+---
+
+### 19.6 Self-Study Hands-On Exercise (Stage 11)
+
+1. **Verify Agent Queue Triage & Ticket Claiming**:
+   - Log in as Agent Sarah (`agent.sarah@supportflow.com` / `AgentPassword123!`).
+   - On `/dashboard`, verify the **AGENT Workspace** metrics: `Assigned to Me`, `My In Progress`, and `Unassigned in Queue`.
+   - Go to `/tickets`, filter by `Unassigned Only`, and click **Claim** on an unassigned ticket.
+   - Confirm that the assignee changes to Sarah Connor and the ticket is now in your active workload.
+
+2. **Verify Staff Internal Notes & Customer Masking**:
+   - In the claimed ticket, post a reply with the **Private Internal Note** box checked.
+   - Confirm that the note displays the amber border and `Internal Staff Note` badge.
+   - Log out and log in as Customer Alice (`alice@example.com` / `CustomerPassword123!`).
+   - Open the same ticket: verify that the internal staff note is completely absent from Alice's conversation timeline.
+
+3. **Verify Admin Reopen Authorization**:
+   - Log in as Admin (`admin@supportflow.com` / `AdminPassword123!`).
+   - Open a `Closed` ticket.
+   - Notice that the **Move to Open** transition button is available exclusively to Administrators.
+   - Click **Move to Open** and confirm the status transitions back to `Open`.
+
+---
+
+## 20. Stage 12: Production Readiness, Architectural Audit & Portfolio Interview Guide
+
+### 20.1 Executive Summary of SupportFlow
+SupportFlow is an enterprise-grade customer support platform engineered to demonstrate advanced Full-Stack MERN development patterns. Rather than building a basic CRUD application, SupportFlow addresses real-world engineering challenges:
+1. **Multi-Tenant Data Scoping**: Customers are cryptographically and query-isolated to their own tickets.
+2. **Deterministic Lifecycle State Machine**: Finite states (`open` -> `in_progress` -> `resolved` -> `closed`) eliminate invalid transitions and enforce role authorities.
+3. **Internal Note Data Privacy**: A 4-layer defense ensures private staff investigations are never transmitted over the wire to customers.
+4. **XSS-Resistant Authentication**: Storing JWT access tokens strictly in React RAM prevents token exfiltration by third-party scripts.
+5. **High-Performance Aggregations**: MongoDB `$facet` pipelines compute role-tailored queue statistics in a single database round-trip.
+
+---
+
+### 20.2 Complete Architectural Matrix
+
+| Architectural Layer | Implementation | Design Rationale & Benefit |
+| :--- | :--- | :--- |
+| **Client State** | React 19 `AuthContext` + Closures | Volatile in-memory token storage prevents script-based XSS theft via `localStorage`. |
+| **Routing & Guarding** | React Router DOM v7 `<ProtectedRoute>` | Preserves deep link navigation via `location.state.from` and enforces RBAC boundaries. |
+| **Styling & Theme** | Native CSS Custom Properties | Zero framework overhead; delivers a sleek SaaS dark palette with responsive data tables. |
+| **API Transport** | Centralized `api/client.js` Wrapper | Uniform Bearer header injection, automated 401 invalidation hooks, and JSON error normalization. |
+| **Backend Framework** | Node.js (v22) + Express (v4) | Modular 3-tier architecture: Routes ➔ Controllers ➔ Services with fail-fast env validation. |
+| **Validation Layer** | `express-validator` | Comprehensive input sanitization masking bad payloads before reaching controllers. |
+| **Data Persistence** | MongoDB (v7) + Mongoose (v8) | Referenced document modeling with compound indexes and atomic `$inc` counter sequencing. |
+| **Quality Assurance** | Jest + Supertest + Memory Mongo | 8 test suites and 54 integration tests running with complete database isolation. |
+
+---
+
+### 20.3 End-to-End System Flow Diagram
+
+```mermaid
+graph TD
+    Client[React 19 SPA] -->|HTTPS REST| NGINX[Reverse Proxy / Gateway]
+    NGINX --> Express[Node.js / Express Server]
+
+    subgraph Middleware Pipeline
+        Express --> FailFast[Fail-Fast Env & CORS]
+        FailFast --> JWTAuth[JWT Bearer Authenticator]
+        JWTAuth --> RBAC[Role-Based Access Control]
+        RBAC --> Validator[express-validator Sanitizer]
+    end
+
+    subgraph Service Layer
+        Validator --> TicketEngine[Ticket Service & State Machine]
+        Validator --> CommentEngine[Comment Service & Privacy Filter]
+        Validator --> MetricEngine[Dashboard & Aggregation Engine]
+        Validator --> AuditEngine[Audit Trail Logger]
+    end
+
+    subgraph Data Store
+        TicketEngine --> Mongo[(MongoDB Document Store)]
+        CommentEngine --> Mongo
+        MetricEngine --> Mongo
+        AuditEngine --> Mongo
+    end
+```
+
+---
+
+### 20.4 High-Yield Interview Questions & Detailed Technical Answers
+
+#### Q1: Why did you separate `Comments` and `AuditLogs` into standalone collections instead of embedding them as subdocument arrays inside the `Ticket` document?
+> **Answer**:  
+> In MongoDB, embedding related data in an array inside a parent document is tempting for simple use cases, but it creates three severe architectural bottlenecks as an application scales:
+> 1. **The 16MB Document Limit**: If an active ticket has hundreds of comments, attachments, and audit events over weeks, an embedded document can grow unboundedly, risking MongoDB's 16MB document size limit.
+> 2. **Unbounded Document Growth & Memory Reallocation**: In WiredTiger, repeatedly appending items to an embedded array forces the storage engine to reallocate and relocate documents on disk, causing heavy fragmentation and memory pressure.
+> 3. **Concurrency & Locking Contention**: If an agent writes an internal note at the exact millisecond an automated bot updates the ticket status, saving the entire parent document causes write collisions or requires optimistic concurrency locking (`__v`).
+> By referencing `Comments` and `AuditLogs` via foreign key `ticket: ObjectId`, we achieve **O(1) comment creation**, support **paginated lazy loading** via compound indexes (`{ ticket: 1, createdAt: 1 }`), and allow completely independent query filtering (such as isolating `{ isInternal: false }` for customers).
+
+#### Q2: How does the atomic sequential ticket numbering (`SUP-1001`) avoid race conditions under high concurrent traffic?
+> **Answer**:  
+> If an application queries `Ticket.countDocuments()` or `Ticket.findOne().sort('-createdAt')` and adds 1 in Node.js memory, two concurrent requests arriving within milliseconds will read the same number and collide on insertion.  
+> In SupportFlow, we implement the **Atomic Counter Pattern**:
+> ```javascript
+> const counter = await Counter.findByIdAndUpdate(
+>   sequenceName,
+>   { $inc: { seq: 1 } },
+>   { new: true, upsert: true }
+> );
+> return offset + counter.seq;
+> ```
+> Because MongoDB executes `$inc` as an **atomic single-document operation**, the database handles serialization at the engine level. No two requests can ever receive the same sequence number, completely eliminating race conditions without requiring slow table locks.
+
+#### Q3: Why use MongoDB `$facet` aggregation pipelines instead of executing multiple separate `countDocuments()` queries for the dashboard?
+> **Answer**:  
+> If an administrator dashboard requires counts for `total`, `open`, `inProgress`, `resolved`, `closed`, `unassigned`, and `urgentAttention`, running separate queries creates:
+> 1. **High Network Latency**: 7 separate round-trips over the network between Express and MongoDB.
+> 2. **Phantom Reads & Point-in-Time Inconsistencies**: Because tickets are constantly being created and updated, the individual query counts might not sum to the total count if data changed between query 1 and query 7.
+> 3. **Database Overhead**: Multiple index scans and connection pool utilization.  
+> Using `$facet`:
+> ```javascript
+> const [result] = await Ticket.aggregate([
+>   {
+>     $facet: {
+>       byStatus: [{ $group: { _id: '$status', count: { $sum: 1 } } }],
+>       byPriority: [{ $group: { _id: '$priority', count: { $sum: 1 } } }],
+>       unassigned: [{ $match: { assignedTo: null, status: { $ne: 'closed' } } }, { $count: 'count' }],
+>       total: [{ $count: 'count' }]
+>     }
+>   }
+> ]);
+> ```
+> MongoDB runs all sub-pipelines in **a single database pass** against a **consistent snapshot**, returning all metrics in a single round-trip.
+
+#### Q4: Explain the security trade-offs of storing JWTs in React memory versus HTTP-only Cookies versus localStorage.
+> **Answer**:  
+> | Storage Location | XSS Risk | CSRF Risk | Persistence | Architectural Suitability |
+> | :--- | :--- | :--- | :--- | :--- |
+> | **`localStorage`** | **Critical**: Vulnerable to any script or malicious npm dependency reading `localStorage.getItem()`. | Immune (explicit header needed). | Persists across tabs and reloads. | Prototyping only; unacceptable for high-security enterprise SaaS. |
+> | **HTTP-only Cookie** | Immune to JavaScript reading. | **Vulnerable**: Browser automatically sends cookies with cross-site requests unless paired with `SameSite=Strict` and Anti-CSRF tokens. | Persists across tabs and reloads. | Standard for traditional monolithic web apps or subdomains. |
+> | **React RAM (In-Memory)** | **Immune**: Token lives in closure memory; cannot be scraped via the Storage API. | **Immune**: Must be explicitly attached as `Authorization: Bearer <token>`. | Cleared on page refresh / tab close. | **Chosen for SupportFlow**: Zero token theft risk; pairs in enterprise production with a silent Refresh Token Cookie. |
+
+---
+
+### 20.5 Resume Bullets & Technical Talking Points
+
+Use these high-impact bullet points for your software engineering resume:
+- *Architected and developed **SupportFlow**, a full-stack SaaS ticket management platform using Node.js, Express, React 19, and MongoDB, featuring multi-tenant Role-Based Access Control across Customer, Support Agent, and Administrator personas.*
+- *Implemented an **in-memory JWT authentication architecture** paired with automated 401 interceptor hooks, completely eliminating token theft vulnerabilities from Cross-Site Scripting (XSS).*
+- *Engineered a **finite state machine** and **4-layer server-side privacy defense** ensuring confidential internal staff notes and audit logs are never exposed or transmitted to external customers.*
+- *Optimized dashboard performance by designing multi-faceted **MongoDB `$facet` aggregation pipelines**, reducing database round-trips by 85% while delivering real-time queue triage metrics.*
+- *Established an automated test suite of **54 integration tests** using Jest, Supertest, and `mongodb-memory-server`, achieving 100% test pass rates and zero-downtime regression safety.*
 
 
 

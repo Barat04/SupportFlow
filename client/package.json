@@ -1,7 +1,8 @@
 {
-  "name": "client",
+  "name": "supportflow-client",
   "private": true,
-  "version": "0.0.0",
+  "version": "1.0.0",
+  "description": "Frontend React SPA for SupportFlow customer support ticket management",
   "type": "module",
   "scripts": {
     "dev": "vite",

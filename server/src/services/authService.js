@@ -105,9 +105,22 @@ async function getUserProfile(userId) {
   return user;
 }
 
+/**
+ * Retrieves active staff members (Agents & Admins) for ticket assignment.
+ * 
+ * @returns {Promise<Array<Object>>}
+ */
+async function getStaffMembers() {
+  return User.find({
+    role: { $in: [ROLES.AGENT, ROLES.ADMIN] },
+    isActive: true
+  }).select('name email role');
+}
+
 module.exports = {
   generateToken,
   registerCustomer,
   loginUser,
-  getUserProfile
+  getUserProfile,
+  getStaffMembers
 };

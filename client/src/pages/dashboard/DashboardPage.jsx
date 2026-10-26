@@ -1,59 +1,71 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { Link } from 'react-router-dom';
 import { useAuth } from '../../hooks/useAuth';
+import { dashboardApi } from '../../api/dashboardApi';
+import { ticketApi } from '../../api/ticketApi';
 import { Button } from '../../components/common/Button';
-import { Alert } from '../../components/common/Alert';
 import { StatusBadge } from '../../components/common/StatusBadge';
+import { PriorityBadge } from '../../components/common/PriorityBadge';
+import { Spinner } from '../../components/common/Spinner';
+import { Alert } from '../../components/common/Alert';
 import {
   LifeBuoy,
-  ShieldCheck,
   Ticket,
   PlusCircle,
-  Users,
+  Clock,
   CheckCircle2,
-  Lock,
-  ExternalLink,
-  Activity
+  AlertTriangle,
+  ArrowRight,
+  Shield,
+  Inbox,
+  Activity,
+  Layers,
+  Sparkles,
+  BarChart3
 } from 'lucide-react';
-import { authApi } from '../../api/authApi';
 
 export function DashboardPage() {
-  const { user, token, logout } = useAuth();
-  const [apiResponse, setApiResponse] = useState(null);
-  const [testingApi, setTestingApi] = useState(false);
+  const { user } = useAuth();
 
-  /**
-   * Proves in-memory Authorization Bearer token works against protected backend endpoint.
-   */
-  const handleTestAuthMe = async () => {
-    setTestingApi(true);
+  const [metrics, setMetrics] = useState(null);
+  const [recentTickets, setRecentTickets] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [errorMsg, setErrorMsg] = useState('');
+
+  const role = user?.role || 'customer';
+  const isAdmin = role === 'admin';
+  const isAgent = role === 'agent';
+  const isCustomer = role === 'customer';
+
+  const loadDashboardData = useCallback(async () => {
+    setLoading(true);
+    setErrorMsg('');
     try {
-      const res = await authApi.getMe();
-      setApiResponse({
-        status: 'success',
-        message: 'Protected endpoint GET /api/auth/me responded with 200 OK!',
-        payload: res
-      });
-    } catch (err) {
-      setApiResponse({
-        status: 'error',
-        message: err.message || 'API request failed'
-      });
-    } finally {
-      setTestingApi(false);
-    }
-  };
+      const [metricsRes, ticketsRes] = await Promise.all([
+        dashboardApi.getMetrics(),
+        ticketApi.getTickets({ limit: 5, sortBy: '-createdAt' })
+      ]);
 
-  const getRoleDescription = (role) => {
-    switch (role) {
-      case 'admin':
-        return 'Full system authority: view system metrics, manage user roles, reassign tickets, and reopen closed tickets.';
-      case 'agent':
-        return 'Queue operator: triage incoming tickets, claim unassigned tickets, write internal notes, and progress tickets.';
-      case 'customer':
-      default:
-        return 'Support requester: submit new tickets, view public updates, and collaborate with support agents.';
+      setMetrics(metricsRes.metrics);
+      setRecentTickets(ticketsRes.tickets || []);
+    } catch (err) {
+      setErrorMsg(err.message || 'Failed to load dashboard metrics.');
+    } finally {
+      setLoading(false);
     }
+  }, []);
+
+  useEffect(() => {
+    loadDashboardData();
+  }, [loadDashboardData]);
+
+  const formatDate = (isoString) => {
+    if (!isoString) return '—';
+    const date = new Date(isoString);
+    return date.toLocaleDateString(undefined, {
+      month: 'short',
+      day: 'numeric'
+    });
   };
 
   return (
@@ -62,158 +74,375 @@ export function DashboardPage() {
       <div
         className="card"
         style={{
-          background: 'linear-gradient(135deg, rgba(15, 23, 42, 0.9) 0%, rgba(30, 27, 75, 0.7) 100%)',
+          background: 'linear-gradient(135deg, rgba(15, 23, 42, 0.95) 0%, rgba(30, 27, 75, 0.8) 100%)',
           borderColor: 'rgba(99, 102, 241, 0.3)',
-          position: 'relative',
-          overflow: 'hidden'
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          flexWrap: 'wrap',
+          gap: '1.25rem'
         }}
       >
-        <div style={{ position: 'relative', zIndex: 2 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', marginBottom: '0.75rem' }}>
+        <div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', marginBottom: '0.5rem' }}>
             <span
-              className="badge"
               style={{
-                backgroundColor: 'rgba(99, 102, 241, 0.2)',
-                color: 'var(--primary)',
-                border: '1px solid rgba(99, 102, 241, 0.3)'
+                textTransform: 'uppercase',
+                fontWeight: 800,
+                fontSize: '0.75rem',
+                padding: '0.2rem 0.65rem',
+                borderRadius: 'var(--radius-sm)',
+                backgroundColor:
+                  isAdmin
+                    ? 'rgba(239, 68, 68, 0.2)'
+                    : isAgent
+                    ? 'rgba(99, 102, 241, 0.2)'
+                    : 'rgba(52, 211, 153, 0.2)',
+                color:
+                  isAdmin
+                    ? 'var(--danger)'
+                    : isAgent
+                    ? 'var(--primary)'
+                    : 'var(--status-resolved-text)',
+                border: '1px solid currentColor'
               }}
             >
-              Stage 9 Active
+              {role} Workspace
             </span>
             <span style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>
-              Frontend Authentication & State Management
+              Live SupportFlow Service Hub
             </span>
           </div>
 
-          <h1 style={{ fontSize: '2.25rem', marginBottom: '0.5rem', fontWeight: 800 }}>
-            Welcome back, {user?.name || 'User'}!
+          <h1 style={{ fontSize: '2rem', fontWeight: 800, letterSpacing: '-0.02em', margin: '0 0 0.35rem' }}>
+            Welcome back, {user?.name}!
           </h1>
-          <p style={{ maxWidth: '680px', color: 'var(--text-muted)', fontSize: '1rem', lineHeight: '1.6' }}>
-            {getRoleDescription(user?.role)}
+          <p style={{ color: 'var(--text-muted)', fontSize: '0.95rem', margin: 0, maxWidth: '640px' }}>
+            {isAdmin
+              ? 'Complete operational oversight: monitor ticket triage, agent assignments, and customer resolutions.'
+              : isAgent
+              ? 'Support Queue Operator: review incoming inquiries, triage priority blockers, and progress assigned tickets.'
+              : 'Support Portal: review active support requests, view engineering replies, or submit a new inquiry.'}
           </p>
+        </div>
 
-          <div style={{ display: 'flex', gap: '1rem', marginTop: '1.5rem', flexWrap: 'wrap' }}>
-            {user?.role !== 'agent' && (
-              <Link to="/tickets/new" style={{ textDecoration: 'none' }}>
-                <Button variant="primary" icon={PlusCircle}>
-                  Create New Ticket
-                </Button>
-              </Link>
-            )}
-            <Link to="/tickets" style={{ textDecoration: 'none' }}>
-              <Button variant="secondary" icon={Ticket}>
-                View Support Queue
+        <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center' }}>
+          {(isCustomer || isAdmin) && (
+            <Link to="/tickets/new" style={{ textDecoration: 'none' }}>
+              <Button variant="primary" icon={PlusCircle}>
+                New Ticket
               </Button>
             </Link>
-            <Button
-              variant="ghost"
-              icon={Activity}
-              onClick={handleTestAuthMe}
-              loading={testingApi}
-            >
-              Verify Bearer Token API
+          )}
+          <Link to="/tickets" style={{ textDecoration: 'none' }}>
+            <Button variant="secondary" icon={Ticket}>
+              {isCustomer ? 'My Tickets' : 'View Queue'}
             </Button>
-          </div>
+          </Link>
         </div>
       </div>
 
-      {/* Live Token Verification feedback */}
-      {apiResponse && (
-        <Alert type={apiResponse.status === 'success' ? 'info' : 'error'}>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-            <strong>{apiResponse.message}</strong>
-            {apiResponse.payload && (
-              <pre
-                style={{
-                  margin: 0,
-                  padding: '0.75rem',
-                  borderRadius: 'var(--radius-sm)',
-                  backgroundColor: 'rgba(0, 0, 0, 0.4)',
-                  fontSize: '0.8rem',
-                  overflowX: 'auto'
-                }}
-              >
-                {JSON.stringify(apiResponse.payload, null, 2)}
-              </pre>
+      {errorMsg && <Alert type="error">{errorMsg}</Alert>}
+
+      {loading ? (
+        <div className="card" style={{ display: 'flex', justifyContent: 'center', padding: '4rem' }}>
+          <Spinner size="lg" />
+        </div>
+      ) : (
+        <>
+          {/* Metrics Grid */}
+          {/* 1. ADMIN METRICS */}
+          {isAdmin && metrics?.overview && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '1.25rem' }}>
+                {/* Total */}
+                <div className="card" style={{ padding: '1.25rem' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
+                    <span style={{ color: 'var(--text-muted)', fontSize: '0.85rem', fontWeight: 600 }}>Total Tickets</span>
+                    <Ticket size={18} color="var(--primary)" />
+                  </div>
+                  <div style={{ fontSize: '2rem', fontWeight: 800, color: '#fff' }}>
+                    {metrics.overview.total}
+                  </div>
+                  <span style={{ fontSize: '0.75rem', color: 'var(--text-subtle)' }}>System-wide volume</span>
+                </div>
+
+                {/* Open */}
+                <div className="card" style={{ padding: '1.25rem' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
+                    <span style={{ color: 'var(--text-muted)', fontSize: '0.85rem', fontWeight: 600 }}>Open</span>
+                    <span style={{ width: '8px', height: '8px', borderRadius: '50%', backgroundColor: 'var(--status-open-text)' }} />
+                  </div>
+                  <div style={{ fontSize: '2rem', fontWeight: 800, color: 'var(--status-open-text)' }}>
+                    {metrics.overview.open}
+                  </div>
+                  <span style={{ fontSize: '0.75rem', color: 'var(--text-subtle)' }}>Awaiting action</span>
+                </div>
+
+                {/* In Progress */}
+                <div className="card" style={{ padding: '1.25rem' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
+                    <span style={{ color: 'var(--text-muted)', fontSize: '0.85rem', fontWeight: 600 }}>In Progress</span>
+                    <span style={{ width: '8px', height: '8px', borderRadius: '50%', backgroundColor: 'var(--status-progress-text)' }} />
+                  </div>
+                  <div style={{ fontSize: '2rem', fontWeight: 800, color: 'var(--status-progress-text)' }}>
+                    {metrics.overview.inProgress}
+                  </div>
+                  <span style={{ fontSize: '0.75rem', color: 'var(--text-subtle)' }}>Active investigations</span>
+                </div>
+
+                {/* Resolved */}
+                <div className="card" style={{ padding: '1.25rem' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
+                    <span style={{ color: 'var(--text-muted)', fontSize: '0.85rem', fontWeight: 600 }}>Resolved</span>
+                    <CheckCircle2 size={18} color="var(--status-resolved-text)" />
+                  </div>
+                  <div style={{ fontSize: '2rem', fontWeight: 800, color: 'var(--status-resolved-text)' }}>
+                    {metrics.overview.resolved}
+                  </div>
+                  <span style={{ fontSize: '0.75rem', color: 'var(--text-subtle)' }}>Pending closure</span>
+                </div>
+              </div>
+
+              {/* Actionable Highlights Strip for Admin */}
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '1.25rem' }}>
+                <Link to="/tickets?assignedTo=unassigned" style={{ textDecoration: 'none' }}>
+                  <div
+                    className="card"
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      borderColor: metrics.overview.unassigned > 0 ? 'rgba(245, 158, 11, 0.4)' : 'var(--border-subtle)',
+                      background: metrics.overview.unassigned > 0 ? 'rgba(245, 158, 11, 0.04)' : 'var(--bg-card)'
+                    }}
+                  >
+                    <div>
+                      <div style={{ fontSize: '0.85rem', color: 'var(--text-muted)', fontWeight: 600 }}>
+                        Unassigned Tickets
+                      </div>
+                      <div style={{ fontSize: '1.5rem', fontWeight: 800, color: metrics.overview.unassigned > 0 ? 'var(--warning)' : '#fff' }}>
+                        {metrics.overview.unassigned}
+                      </div>
+                      <span style={{ fontSize: '0.75rem', color: 'var(--text-subtle)' }}>Needs agent triage</span>
+                    </div>
+                    <ArrowRight size={20} color="var(--text-muted)" />
+                  </div>
+                </Link>
+
+                <Link to="/tickets?priority=urgent" style={{ textDecoration: 'none' }}>
+                  <div
+                    className="card"
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      borderColor: metrics.overview.needsAttention > 0 ? 'rgba(239, 68, 68, 0.4)' : 'var(--border-subtle)',
+                      background: metrics.overview.needsAttention > 0 ? 'rgba(239, 68, 68, 0.04)' : 'var(--bg-card)'
+                    }}
+                  >
+                    <div>
+                      <div style={{ fontSize: '0.85rem', color: 'var(--text-muted)', fontWeight: 600 }}>
+                        High & Urgent Attention
+                      </div>
+                      <div style={{ fontSize: '1.5rem', fontWeight: 800, color: metrics.overview.needsAttention > 0 ? 'var(--danger)' : '#fff' }}>
+                        {metrics.overview.needsAttention}
+                      </div>
+                      <span style={{ fontSize: '0.75rem', color: 'var(--text-subtle)' }}>Critical active issues</span>
+                    </div>
+                    <ArrowRight size={20} color="var(--text-muted)" />
+                  </div>
+                </Link>
+              </div>
+            </div>
+          )}
+
+          {/* 2. AGENT METRICS */}
+          {isAgent && metrics?.assignedToMe && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '1.25rem' }}>
+                <div className="card" style={{ padding: '1.25rem' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
+                    <span style={{ color: 'var(--text-muted)', fontSize: '0.85rem', fontWeight: 600 }}>Assigned to Me</span>
+                    <Shield size={18} color="var(--primary)" />
+                  </div>
+                  <div style={{ fontSize: '2rem', fontWeight: 800, color: '#fff' }}>
+                    {metrics.assignedToMe.total}
+                  </div>
+                  <span style={{ fontSize: '0.75rem', color: 'var(--text-subtle)' }}>Your current workload</span>
+                </div>
+
+                <div className="card" style={{ padding: '1.25rem' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
+                    <span style={{ color: 'var(--text-muted)', fontSize: '0.85rem', fontWeight: 600 }}>My In Progress</span>
+                    <span style={{ width: '8px', height: '8px', borderRadius: '50%', backgroundColor: 'var(--status-progress-text)' }} />
+                  </div>
+                  <div style={{ fontSize: '2rem', fontWeight: 800, color: 'var(--status-progress-text)' }}>
+                    {metrics.assignedToMe.inProgress}
+                  </div>
+                  <span style={{ fontSize: '0.75rem', color: 'var(--text-subtle)' }}>Under active handling</span>
+                </div>
+
+                <div className="card" style={{ padding: '1.25rem' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
+                    <span style={{ color: 'var(--text-muted)', fontSize: '0.85rem', fontWeight: 600 }}>Unassigned in Queue</span>
+                    <Inbox size={18} color="var(--warning)" />
+                  </div>
+                  <div style={{ fontSize: '2rem', fontWeight: 800, color: 'var(--warning)' }}>
+                    {metrics.globalQueue?.unassigned || 0}
+                  </div>
+                  <span style={{ fontSize: '0.75rem', color: 'var(--text-subtle)' }}>Available to claim</span>
+                </div>
+
+                <div className="card" style={{ padding: '1.25rem' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
+                    <span style={{ color: 'var(--text-muted)', fontSize: '0.85rem', fontWeight: 600 }}>My Priority Attention</span>
+                    <AlertTriangle size={18} color="var(--danger)" />
+                  </div>
+                  <div style={{ fontSize: '2rem', fontWeight: 800, color: 'var(--danger)' }}>
+                    {metrics.assignedToMe.needsAttention}
+                  </div>
+                  <span style={{ fontSize: '0.75rem', color: 'var(--text-subtle)' }}>High & Urgent priority</span>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* 3. CUSTOMER METRICS */}
+          {isCustomer && metrics?.myTickets && (
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '1.25rem' }}>
+              <div className="card" style={{ padding: '1.25rem' }}>
+                <div style={{ color: 'var(--text-muted)', fontSize: '0.85rem', fontWeight: 600, marginBottom: '0.5rem' }}>
+                  Total Requests
+                </div>
+                <div style={{ fontSize: '2rem', fontWeight: 800, color: '#fff' }}>
+                  {metrics.myTickets.total}
+                </div>
+                <span style={{ fontSize: '0.75rem', color: 'var(--text-subtle)' }}>All tickets submitted</span>
+              </div>
+
+              <div className="card" style={{ padding: '1.25rem' }}>
+                <div style={{ color: 'var(--text-muted)', fontSize: '0.85rem', fontWeight: 600, marginBottom: '0.5rem' }}>
+                  Open Tickets
+                </div>
+                <div style={{ fontSize: '2rem', fontWeight: 800, color: 'var(--status-open-text)' }}>
+                  {metrics.myTickets.open}
+                </div>
+                <span style={{ fontSize: '0.75rem', color: 'var(--text-subtle)' }}>Awaiting review</span>
+              </div>
+
+              <div className="card" style={{ padding: '1.25rem' }}>
+                <div style={{ color: 'var(--text-muted)', fontSize: '0.85rem', fontWeight: 600, marginBottom: '0.5rem' }}>
+                  In Progress
+                </div>
+                <div style={{ fontSize: '2rem', fontWeight: 800, color: 'var(--status-progress-text)' }}>
+                  {metrics.myTickets.inProgress}
+                </div>
+                <span style={{ fontSize: '0.75rem', color: 'var(--text-subtle)' }}>Engineer investigating</span>
+              </div>
+
+              <div className="card" style={{ padding: '1.25rem' }}>
+                <div style={{ color: 'var(--text-muted)', fontSize: '0.85rem', fontWeight: 600, marginBottom: '0.5rem' }}>
+                  Resolved / Closed
+                </div>
+                <div style={{ fontSize: '2rem', fontWeight: 800, color: 'var(--status-resolved-text)' }}>
+                  {metrics.myTickets.resolved + metrics.myTickets.closed}
+                </div>
+                <span style={{ fontSize: '0.75rem', color: 'var(--text-subtle)' }}>Completed requests</span>
+              </div>
+            </div>
+          )}
+
+          {/* Recent Tickets Activity Section */}
+          <div className="card">
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.25rem' }}>
+              <div>
+                <h3 style={{ fontSize: '1.15rem', fontWeight: 700, margin: '0 0 0.25rem' }}>
+                  Recent Tickets
+                </h3>
+                <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', margin: 0 }}>
+                  Latest ticket updates and activity
+                </p>
+              </div>
+
+              <Link to="/tickets" style={{ textDecoration: 'none' }}>
+                <Button variant="ghost" style={{ fontSize: '0.825rem' }}>
+                  <span>View All</span>
+                  <ArrowRight size={14} />
+                </Button>
+              </Link>
+            </div>
+
+            {recentTickets.length === 0 ? (
+              <div style={{ textAlign: 'center', padding: '2rem', color: 'var(--text-muted)', fontSize: '0.9rem' }}>
+                No recent tickets found.
+              </div>
+            ) : (
+              <div className="table-container">
+                <table className="table">
+                  <thead>
+                    <tr>
+                      <th style={{ width: '120px' }}>Ticket #</th>
+                      <th>Title</th>
+                      <th style={{ width: '130px' }}>Status</th>
+                      <th style={{ width: '110px' }}>Priority</th>
+                      <th style={{ width: '110px' }}>Created</th>
+                      <th style={{ width: '80px', textAlign: 'right' }}>Action</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {recentTickets.map((t) => (
+                      <tr key={t.id || t._id}>
+                        <td>
+                          <Link
+                            to={`/tickets/${t.id || t._id}`}
+                            style={{
+                              fontFamily: 'monospace',
+                              fontWeight: 700,
+                              color: 'var(--primary)',
+                              textDecoration: 'none'
+                            }}
+                          >
+                            {t.ticketNumber}
+                          </Link>
+                        </td>
+                        <td>
+                          <Link
+                            to={`/tickets/${t.id || t._id}`}
+                            style={{
+                              fontWeight: 600,
+                              color: 'var(--text-main)',
+                              textDecoration: 'none'
+                            }}
+                          >
+                            {t.title}
+                          </Link>
+                        </td>
+                        <td>
+                          <StatusBadge status={t.status} />
+                        </td>
+                        <td>
+                          <PriorityBadge priority={t.priority} />
+                        </td>
+                        <td style={{ fontSize: '0.825rem', color: 'var(--text-muted)' }}>
+                          {formatDate(t.createdAt)}
+                        </td>
+                        <td style={{ textAlign: 'right' }}>
+                          <Link to={`/tickets/${t.id || t._id}`} style={{ textDecoration: 'none' }}>
+                            <Button variant="ghost" style={{ padding: '0.3rem 0.6rem', fontSize: '0.78rem' }}>
+                              View
+                            </Button>
+                          </Link>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             )}
           </div>
-        </Alert>
+        </>
       )}
-
-      {/* User Session Profile & Security Architecture Showcase */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: '1.5rem' }}>
-        {/* Active Session Info */}
-        <div className="card">
-          <h3 style={{ marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-            <ShieldCheck size={20} color="var(--primary)" />
-            <span>Authenticated Profile</span>
-          </h3>
-
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.85rem' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', paddingBottom: '0.5rem', borderBottom: '1px solid var(--border-subtle)' }}>
-              <span style={{ color: 'var(--text-muted)', fontSize: '0.875rem' }}>Full Name</span>
-              <span style={{ fontWeight: 600 }}>{user?.name}</span>
-            </div>
-            <div style={{ display: 'flex', justifyContent: 'space-between', paddingBottom: '0.5rem', borderBottom: '1px solid var(--border-subtle)' }}>
-              <span style={{ color: 'var(--text-muted)', fontSize: '0.875rem' }}>Email Address</span>
-              <span style={{ fontWeight: 600 }}>{user?.email}</span>
-            </div>
-            <div style={{ display: 'flex', justifyContent: 'space-between', paddingBottom: '0.5rem', borderBottom: '1px solid var(--border-subtle)' }}>
-              <span style={{ color: 'var(--text-muted)', fontSize: '0.875rem' }}>Assigned Role</span>
-              <span
-                style={{
-                  textTransform: 'uppercase',
-                  fontWeight: 700,
-                  fontSize: '0.75rem',
-                  padding: '0.2rem 0.6rem',
-                  borderRadius: 'var(--radius-sm)',
-                  backgroundColor:
-                    user?.role === 'admin'
-                      ? 'rgba(239, 68, 68, 0.2)'
-                      : user?.role === 'agent'
-                      ? 'rgba(99, 102, 241, 0.2)'
-                      : 'rgba(52, 211, 153, 0.2)',
-                  color:
-                    user?.role === 'admin'
-                      ? 'var(--danger)'
-                      : user?.role === 'agent'
-                      ? 'var(--primary)'
-                      : 'var(--status-resolved-text)'
-                }}
-              >
-                {user?.role}
-              </span>
-            </div>
-            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-              <span style={{ color: 'var(--text-muted)', fontSize: '0.875rem' }}>User ID</span>
-              <code style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>{user?.id}</code>
-            </div>
-          </div>
-        </div>
-
-        {/* Security Architecture Guarantees */}
-        <div className="card">
-          <h3 style={{ marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-            <Lock size={20} color="var(--status-resolved-text)" />
-            <span>In-Memory Security Guarantees</span>
-          </h3>
-
-          <ul style={{ paddingLeft: '1.25rem', color: 'var(--text-muted)', fontSize: '0.875rem', lineHeight: '1.7' }}>
-            <li>
-              <strong>RAM-Only JWT:</strong> The token string is stored in a JavaScript module closure and React state.
-            </li>
-            <li>
-              <strong>Zero Web Storage Footprint:</strong> Zero tokens in <code>localStorage</code> or <code>sessionStorage</code> prevents token theft by malicious extensions or XSS injection.
-            </li>
-            <li>
-              <strong>Automatic 401 Interceptor:</strong> Expired sessions automatically trigger the centralized unauthorized handler and clear state.
-            </li>
-            <li>
-              <strong>Strict RBAC Guard:</strong> Protected routes prevent unauthorized roles from accessing administrative modules.
-            </li>
-          </ul>
-        </div>
-      </div>
     </div>
   );
 }

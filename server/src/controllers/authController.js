@@ -53,8 +53,24 @@ async function getMe(req, res, next) {
   }
 }
 
+/**
+ * Returns active staff members (Agents & Admins) for assignment.
+ */
+async function getStaff(req, res, next) {
+  try {
+    const staff = await authService.getStaffMembers();
+    res.status(200).json({
+      success: true,
+      staff
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
 module.exports = {
   register,
   login,
-  getMe
+  getMe,
+  getStaff
 };
