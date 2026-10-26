@@ -14,7 +14,10 @@
 7. [Engineering Trade-Offs & Alternatives](#7-engineering-trade-offs--alternatives)
 8. [Common Bugs & Debugging Guide](#8-common-bugs--debugging-guide)
 9. [Interview Questions & Detailed Answers](#9-interview-questions--detailed-answers)
-10. [Self-Study Hands-On Exercise](#10-self-study-hands-on-exercise)
+10. [Self-Study Hands-On Exercise (Stage 2)](#10-self-study-hands-on-exercise)
+11. [Stage 3: Authentication, RBAC & User Security](#11-stage-3-authentication-rbac--user-security)
+12. [Stage 4: Ticket Model, Compound Indexes, State Machine & CRUD APIs](#12-stage-4-ticket-model-compound-indexes-state-machine--crud-apis)
+13. [Stage 5: Comments, Internal Notes & Audit Trail](#13-stage-5-comments-internal-notes--audit-trail)
 
 ---
 
@@ -221,3 +224,599 @@ To solidify your understanding of how environment validation and connection mana
      curl -i http://localhost:5000/api/health
      ```
    - Notice the status code (`200 OK`), `readyState: 1`, and uptime counter.
+
+---
+
+## 11. Stage 3: Authentication, RBAC & User Security
+
+### 11.1 What this stage does and why it exists
+Authentication verifies *who* the user is; Authorization (RBAC) determines *what* they are allowed to do.
+In Stage 3, we implemented:
+1. **Customer-Only Self-Registration**: Public requests to register can only produce `customer` accounts. Attempts to pass `role: 'admin'` or `role: 'agent'` are neutralized.
+2. **Password Security with Bcrypt**: Passwords are never stored in plaintext. They are salted and hashed with 12 rounds of bcrypt in a Mongoose pre-save hook.
+3. **Data Leakage Elimination**: Mongoose schema uses `select: false` on the `password` field, and custom `toJSON`/`toObject` transforms guarantee password hashes and internal Mongoose fields (`__v`) never leak into API responses.
+4. **JWT Bearer Token Issuance & Verification**: Stateless tokens contain user identity (`id`, `role`, `email`) signed with the server's `JWT_SECRET`.
+5. **Role-Based Access Control (RBAC) Guard**: Reusable middleware factory `authorizeRoles(...roles)` that checks user permissions on protected endpoints.
+6. **Anti-User-Enumeration Protections**: Login failure returns generic 401 messages regardless of whether the email was missing or the password was incorrect.
+
+---
+
+### 11.2 Request Flow: Registration & Login Architecture
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Client as React Client (or curl)
+    participant Route as Express Router (/api/auth)
+    participant Validator as express-validator Middleware
+    participant Controller as authController.js
+    participant Service as authService.js
+    participant Model as User Model (Mongoose)
+    participant DB as MongoDB
+
+    Client->>Route: POST /api/auth/register { name, email, password }
+    Route->>Validator: Validate body (name length, valid email, min 8 chars)
+    Validator-->>Route: Passed
+    Route->>Controller: register(req, res, next)
+    Controller->>Service: registerCustomer({ name, email, password })
+    Note over Service: Forces role: 'customer' (ignores any client role)
+    Service->>Model: findOne({ email })
+    Model->>DB: Query by email
+    DB-->>Model: Null (user does not exist)
+    Service->>Model: new User({ name, email, password, role: 'customer' })
+    Note over Model: pre('save') hook runs bcrypt.hash(password, salt)
+    Model->>DB: Insert document
+    DB-->>Model: Saved
+    Service->>Service: generateToken(user) -> signs JWT
+    Service-->>Controller: { user, token }
+    Note over Controller: Schema toJSON transform strips password & __v
+    Controller-->>Client: HTTP 201 Created { success: true, token, user }
+```
+
+---
+
+### 11.3 Key Files & Modules Added in Stage 3
+
+| File Path | Responsibility |
+| :--- | :--- |
+| `server/src/constants/roles.js` | Frozen constants defining `ROLES.CUSTOMER`, `ROLES.AGENT`, `ROLES.ADMIN`. Avoids brittle strings across the codebase. |
+| `server/src/models/User.js` | User schema with email uniqueness index, bcrypt pre-save hashing, `comparePassword` instance method, and `toJSON` stripping. |
+| `server/src/validations/authValidation.js` | Declarative validation rules using `express-validator` for registration and login payloads. |
+| `server/src/middleware/validate.js` | Intercepts validation errors and formats them into standard 400 Bad Request JSON responses. |
+| `server/src/utils/errors.js` | Structured application error classes (`BadRequestError`, `UnauthorizedError`, `ForbiddenError`, `ConflictError`, `NotFoundError`). |
+| `server/src/services/authService.js` | Business logic for registration (hardcoded customer role), login verification, token signing, and user profile retrieval. |
+| `server/src/controllers/authController.js` | Maps HTTP requests to `authService` methods and formats JSON responses with appropriate status codes (200, 201). |
+| `server/src/middleware/auth.js` | `authenticate`: Verifies the Bearer JWT token from `Authorization` header and populates `req.user`. |
+| `server/src/middleware/rbac.js` | `authorizeRoles(...roles)`: Enforces role permissions on downstream route handlers. |
+| `server/src/routes/authRoutes.js` | Exposes `/api/auth/register`, `/api/auth/login`, and `/api/auth/me`. |
+| `server/tests/auth.test.js` | Comprehensive automated integration suite testing registration, privilege escalation prevention, password hashing, login, and RBAC guards. |
+
+---
+
+### 11.4 Endpoints & API Contract Reference
+
+#### 1. `POST /api/auth/register`
+- **Access**: Public
+- **Request Body**:
+```json
+{
+  "name": "Jane Customer",
+  "email": "jane@example.com",
+  "password": "SecurePassword123!"
+}
+```
+- **Response (`201 Created`)**:
+```json
+{
+  "success": true,
+  "message": "Account registered successfully",
+  "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+  "user": {
+    "id": "67be8...",
+    "_id": "67be8...",
+    "name": "Jane Customer",
+    "email": "jane@example.com",
+    "role": "customer",
+    "isActive": true,
+    "createdAt": "2026-10-26T05:30:00.000Z",
+    "updatedAt": "2026-10-26T05:30:00.000Z"
+  }
+}
+```
+
+#### 2. `POST /api/auth/login`
+- **Access**: Public
+- **Request Body**:
+```json
+{
+  "email": "jane@example.com",
+  "password": "SecurePassword123!"
+}
+```
+- **Response (`200 OK`)**: Same token and user payload structure as registration.
+- **Response (`401 Unauthorized`)**:
+```json
+{
+  "success": false,
+  "message": "Invalid email or password"
+}
+```
+
+#### 3. `GET /api/auth/me`
+- **Access**: Protected (Requires `Authorization: Bearer <token>`)
+- **Response (`200 OK`)**:
+```json
+{
+  "success": true,
+  "user": {
+    "id": "67be8...",
+    "_id": "67be8...",
+    "name": "Jane Customer",
+    "email": "jane@example.com",
+    "role": "customer",
+    "isActive": true
+  }
+}
+```
+- **Response (`401 Unauthorized`)**: If token is missing, expired, or tampered with.
+
+---
+
+### 11.5 Security Mechanisms Deep Dive
+
+#### 1. Mass Assignment Prevention
+- **Threat**: An attacker inspects API routes and sends `{"role": "admin"}` in their registration JSON.
+- **Defense**: In `authService.js`, the user is instantiated with `role: ROLES.CUSTOMER`. Any `role` passed in `req.body` is completely discarded. Privileged roles (Agent/Admin) can only be created via the database seeder or by an authenticated Administrator via protected endpoints.
+
+#### 2. Anti-User Enumeration
+- **Threat**: Attackers query `/api/auth/login` with harvested email lists. If the server responds with *"Email does not exist"* vs *"Incorrect password"*, the attacker identifies valid email accounts.
+- **Defense**: Both missing emails and wrong passwords return an identical HTTP 401 response: `"Invalid email or password"`.
+
+#### 3. Password Hashing Hooks (`bcrypt.isModified`)
+- **Detail**: In Mongoose, pre-save hooks run whenever a document is saved. If an existing user changes their `name`, we must **not** re-hash the already-hashed password.
+- **Defense**:
+  ```javascript
+  if (!this.isModified('password')) {
+    return next();
+  }
+  ```
+
+---
+
+### 11.6 Common Bugs & How to Debug Them
+
+1. **`comparePassword` Error: "Cannot read property 'compare' of undefined"**
+   - **Root Cause**: The User query did not include `.select('+password')`. Because `password` is defined with `select: false` in Mongoose, queries exclude it by default.
+   - **Fix**: When querying for login authentication, explicitly add `.select('+password')`.
+2. **Double-Hashing Password on Profile Update**
+   - **Root Cause**: Calling `user.save()` when updating fields like `name` without checking `this.isModified('password')` causes bcrypt to hash the existing hash, locking the user out.
+   - **Fix**: Always verify `this.isModified('password')` before running `bcrypt.hash`.
+
+---
+
+### 11.7 Interview Questions & Detailed Answers
+
+#### Q1: Why do we use Bcrypt instead of SHA-256 or MD5 for password hashing?
+> **Answer**:  
+> Fast hashing algorithms like SHA-256 and MD5 are designed for high throughput (checksums and integrity checks). Modern GPUs can compute billions of SHA-256 hashes per second, making brute-force dictionary attacks trivial.  
+> Bcrypt is a **slow, key-derivation function** with an adjustable work factor (salt rounds). A work factor of 12 requires significant CPU time per attempt, rendering offline brute-force attacks computationally infeasible. Additionally, bcrypt automatically generates a cryptographically secure random salt embedded in the resulting hash, thwarting precomputed Rainbow Table attacks.
+
+#### Q2: What is the purpose of `select: false` on Mongoose schemas?
+> **Answer**:  
+> By default, Mongoose queries return all schema fields. If a controller queries `User.findById(id)` and returns the document to the client, sensitive fields like password hashes, reset tokens, or 2FA secrets could be accidentally exposed in API responses.  
+> Setting `select: false` at the schema definition level ensures that Mongoose excludes the field from all queries unless the query author explicitly opts in via `.select('+password')`. Combined with a `toJSON` transform that deletes the field, this provides defense-in-depth against data leakage.
+
+#### Q3: How does the `authorizeRoles` middleware function as a higher-order function?
+> **Answer**:  
+> In Express, middleware functions take `(req, res, next)`. When we need parameterizable middleware (e.g. allowing `admin` and `agent` on one route, but only `admin` on another), we write a factory function that takes the allowed roles and returns a standard Express middleware closure.  
+> The closure retains access to the `allowedRoles` array via lexical scoping and compares it against `req.user.role`, which was established by the preceding `authenticate` middleware. If authorized, it calls `next()`; otherwise, it passes a `403 Forbidden` error to the centralized error handler.
+
+---
+
+### 11.8 Self-Study Hands-On Exercise (Stage 3)
+
+1. **Test Registration via curl**:
+   Run the following command against your local server (with `npm run dev` running and MongoDB connected):
+   ```bash
+   curl -X POST http://localhost:5000/api/auth/register \
+     -H "Content-Type: application/json" \
+     -d '{"name":"Alice Tester","email":"alice@example.com","password":"Password123!"}'
+   ```
+   *Verify that you receive HTTP 201 with a valid JWT and `role: "customer"`.*
+
+2. **Test Privilege Escalation Neutralization**:
+   Try registering with an admin role in the payload:
+   ```bash
+   curl -X POST http://localhost:5000/api/auth/register \
+     -H "Content-Type: application/json" \
+     -d '{"name":"Sneaky User","email":"sneaky@example.com","password":"Password123!","role":"admin"}'
+   ```
+   *Verify that the response returns `role: "customer"` and NOT `admin`.*
+
+3. **Test Authenticated Profile Route**:
+   Copy the `token` string from your registration response and query `/api/auth/me`:
+   ```bash
+   curl -X GET http://localhost:5000/api/auth/me \
+     -H "Authorization: Bearer YOUR_COPIED_TOKEN_HERE"
+   ```
+   *Verify that you receive your sanitized user profile.*
+
+---
+
+## 12. Stage 4: Ticket Model, Compound Indexes, State Machine & CRUD APIs
+
+### 12.1 What this stage does and why it exists
+Support tickets are the primary business domain entity in SupportFlow. This stage implements:
+1. **Atomic Human-Readable Sequential IDs**: Rather than exposing opaque 24-character hexadecimal MongoDB ObjectIds to end users, tickets receive sequential numbers (e.g., `SUP-1001`, `SUP-1002`) generated atomically via a dedicated `Counter` model.
+2. **Compound Index Optimization**: MongoDB indexes tailored specifically to common query access patterns (`customer + status`, `assignedTo + status`, `status + priority + createdAt`).
+3. **Strict Backend Role-Scoping**:
+   - Customers can **only** query and view tickets where `ticket.customer === req.user._id`.
+   - Support Agents have full queue visibility to triage, discover, and claim unassigned tickets.
+4. **Service-Layer State Machine**:
+   - Ticket status transitions are restricted by explicit business transition rules. Jumps like `open` directly to `resolved` are blocked (`422 Unprocessable Entity`).
+   - Customers can only close their own tickets (`* -> closed`).
+   - Reopening closed tickets (`closed -> open`) is strictly restricted to Administrators.
+5. **Ownership & Assignment Policies**:
+   - Support Agents can only update status/priority on tickets *assigned to them*.
+   - Unassigned tickets can be self-claimed by Agents, but Agents cannot steal or reassign tickets claimed by other agents.
+   - Administrators possess global assignment and status override authority.
+
+---
+
+### 12.2 Ticket Status State Machine
+
+```mermaid
+stateDiagram-v2
+    [*] --> open: Customer creates ticket
+    open --> in_progress: Assigned Agent claims & begins work
+    open --> closed: Customer or Admin closes (e.g. duplicate)
+    in_progress --> resolved: Assigned Agent or Admin resolves
+    in_progress --> open: Returned to unassigned queue
+    resolved --> closed: Customer verifies resolution
+    resolved --> in_progress: Customer or Agent reopens if issue persists
+    closed --> open: Admin ONLY reopen
+```
+
+#### Allowed State Transitions Map (`ticketService.js`)
+| Current Status | Allowed Next Statuses | Role Restrictions |
+| :--- | :--- | :--- |
+| `open` | `in_progress`, `closed` | Customer can only transition to `closed`. Agent must be assigned to move to `in_progress`. |
+| `in_progress` | `resolved`, `open` | Assigned Agent or Admin only. |
+| `resolved` | `closed`, `in_progress` | Customer or Admin can close. Customer/Agent/Admin can return to `in_progress`. |
+| `closed` | `open` | **Administrator only**. Terminal for Customers and Agents. |
+
+---
+
+### 12.3 Request Flow: Ticket Status Transition
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Client as Agent Client (React / curl)
+    participant Route as Express Router (/api/tickets/:id/status)
+    participant AuthMW as authenticate Middleware
+    participant ValMW as validate Middleware
+    participant Controller as ticketController.js
+    participant Service as ticketService.js
+    participant Model as Ticket Model (Mongoose)
+    participant DB as MongoDB
+
+    Client->>Route: PATCH /api/tickets/65d4b.../status { status: "in_progress" }
+    Route->>AuthMW: Verify Bearer JWT
+    AuthMW-->>Route: Authenticated as req.user (role: agent)
+    Route->>ValMW: Validate status in enum
+    ValMW-->>Route: Validation passed
+    Route->>Controller: updateStatus(req, res, next)
+    Controller->>Service: updateTicketStatus(ticketId, "in_progress", req.user)
+    Service->>Model: findById(ticketId)
+    Model->>DB: Query ticket
+    DB-->>Model: Ticket found (status: "open", assignedTo: agentId)
+    Note over Service: Checks ownership: assignedTo equals req.user._id
+    Note over Service: Checks state machine: open -> in_progress is valid
+    Service->>Model: ticket.save()
+    Model->>DB: Persist updated status
+    DB-->>Model: Saved
+    Service-->>Controller: Populated ticket document
+    Controller-->>Client: HTTP 200 OK { success: true, message: "...", ticket }
+```
+
+---
+
+### 12.4 Database Design & Compound Indexes
+
+```javascript
+// server/src/models/Ticket.js
+ticketSchema.index({ customer: 1, status: 1 });
+ticketSchema.index({ assignedTo: 1, status: 1 });
+ticketSchema.index({ status: 1, priority: 1, createdAt: -1 });
+```
+
+#### Why Compound Indexes & Why Key Order Matters (Interview Critical):
+- **Index Prefix Rule**: MongoDB can use an index for queries that specify the leading (prefix) fields of the index.
+- `{ customer: 1, status: 1 }`: Supports queries for "All tickets belonging to Alice", as well as "All *open* tickets belonging to Alice". A single index satisfies both customer portal views.
+- `{ assignedTo: 1, status: 1 }`: Supports queries for an Agent's active queue (`assignedTo = me AND status = in_progress`).
+- `{ status: 1, priority: 1, createdAt: -1 }`: Optimizes the global triage queue sorted by urgency and date.
+
+---
+
+### 12.5 Atomic Sequential Numbering: The Counter Pattern
+
+To prevent race conditions where two simultaneous ticket creations receive the same ID:
+```javascript
+// Atomic increment using MongoDB's findByIdAndUpdate
+counterSchema.statics.getNextSequence = async function (counterName, offset = 1000) {
+  const counter = await this.findByIdAndUpdate(
+    counterName,
+    { $inc: { seq: 1 } },
+    { new: true, upsert: true }
+  );
+  return offset + counter.seq;
+};
+```
+- **Atomicity**: In MongoDB, document-level updates with `$inc` are atomic.
+- **Offset calculation**: `1000 + 1 = 1001` (`SUP-1001`), ensuring human-friendly 4-digit numbers from the very first ticket without pre-seeding the database.
+
+---
+
+### 12.6 API Reference: Ticket Endpoints
+
+| Method | Endpoint | Access | Description |
+| :--- | :--- | :--- | :--- |
+| `POST` | `/api/tickets` | Authenticated | Creates a new ticket. Generates sequential `SUP-xxxx` ID. |
+| `GET` | `/api/tickets` | Authenticated | Lists tickets with pagination & filters (`status`, `priority`, `category`, `search`). Customers scoped to own tickets; Agents/Admins view queue. |
+| `GET` | `/api/tickets/:id` | Authenticated | Retrieves single ticket. Customers blocked from viewing others' tickets (403). |
+| `PATCH` | `/api/tickets/:id/status` | Authenticated | Transitions ticket status. Enforces state machine & ownership. |
+| `PATCH` | `/api/tickets/:id/priority` | Agent, Admin | Updates priority (`low`, `medium`, `high`, `urgent`). Agents only on assigned tickets. |
+| `PATCH` | `/api/tickets/:id/assign` | Agent, Admin | Agents can self-claim unassigned tickets. Admins can assign/reassign to anyone. |
+
+---
+
+### 12.7 Interview Questions & Detailed Answers
+
+#### Q1: What is a Compound Index in MongoDB, and what is the "Index Prefix" rule?
+> **Answer**:  
+> A compound index holds references to multiple fields within a single index structure (e.g. `{ customer: 1, status: 1 }`).  
+> The **index prefix rule** states that MongoDB can utilize any index prefix (the beginning subset of indexed fields) to satisfy queries. An index on `{ customer: 1, status: 1 }` can satisfy queries filtering on `customer` alone, or filtering on `customer` AND `status`. However, it cannot efficiently satisfy a query filtering on `status` alone without `customer`, because `status` is not a prefix.
+
+#### Q2: Why enforce state machine transitions in the Service Layer rather than Mongoose Schema validators?
+> **Answer**:  
+> Mongoose schema `enum` validators check whether a value is in a permitted set of strings (e.g. `status` must be `open`, `in_progress`, `resolved`, or `closed`), but they have no awareness of *state transitions* (e.g., whether moving from `open` to `resolved` directly is allowed) or *contextual actor roles* (e.g., whether the requester is a Customer, an Agent assigned to the ticket, or an Administrator).  
+> Placing state machine logic in `ticketService.js` allows evaluating the *current document state*, the *target state*, and the *authenticated actor's identity and role* simultaneously before persisting changes.
+
+#### Q3: How do you prevent race conditions when generating sequential IDs in distributed systems?
+> **Answer**:  
+> Simply querying `Ticket.countDocuments()` or `find().sort({ seq: -1 }).limit(1)` before saving is prone to race conditions: if two requests arrive concurrently, both may read the same count and attempt to save with the duplicate ID.  
+> Using MongoDB's atomic `findOneAndUpdate` with the `$inc` operator on a dedicated `Counter` collection guarantees thread-safe, distributed sequential numbering because MongoDB serializes in-place modifications to the single counter document at the storage engine level.
+
+---
+
+### 12.8 Self-Study Hands-On Exercise (Stage 4)
+
+1. **Create Two Sequential Tickets**:
+   Log in as a customer, capture the token, and create two tickets:
+   ```bash
+   curl -X POST http://localhost:5000/api/tickets \
+     -H "Content-Type: application/json" \
+     -H "Authorization: Bearer YOUR_CUSTOMER_TOKEN" \
+     -d '{"title":"First Ticket","description":"Detailed explanation of issue 1","category":"technical"}'
+   ```
+   *Verify that the first ticket returns `ticketNumber: "SUP-1001"` and the second returns `"SUP-1002"`.*
+
+2. **Test State Machine Enforcement via curl**:
+   Attempt to transition the ticket from `open` directly to `resolved`:
+   ```bash
+   curl -X PATCH http://localhost:5000/api/tickets/YOUR_TICKET_ID/status \
+     -H "Content-Type: application/json" \
+     -H "Authorization: Bearer YOUR_AGENT_TOKEN" \
+     -d '{"status":"resolved"}'
+   ```
+   *Verify that the server rejects this with HTTP 422 Unprocessable Entity and an informative message showing allowed transitions.*
+
+3. **Verify Customer Privacy Isolation**:
+   Attempt to fetch another customer's ticket by ID while authenticated as a different customer.
+   *Verify that the server responds with HTTP 403 Forbidden.*
+
+---
+
+## 13. Stage 5: Comments, Internal Notes & Audit Trail
+
+### 13.1 What this stage does and why it exists
+Customer support workflows require structured collaboration. A single conversation thread contains two distinct types of communication:
+1. **Public Replies**: Visible to the customer and all support staff (e.g., instructions, troubleshooting steps, refund confirmation).
+2. **Private Internal Notes**: Visible **only** to support agents and administrators (e.g., private collaboration, manager approval, sensitive API logs, internal triage flags).
+
+Additionally, regulatory compliance and issue tracking necessitate an **Immutable Audit Trail** recording every significant ticket lifecycle change without leaking private internal notes to customers.
+
+---
+
+### 13.2 Internal Note Privacy: Defense-in-Depth
+
+Internal note data leaks can be catastrophic (e.g. exposing internal customer notes, sensitive security findings, or employee discussions). We enforce privacy through **four independent defensive layers**:
+
+```mermaid
+graph TD
+    subgraph ClientLayer["1. Request Sanitization"]
+        R1[Customer sends payload] --> R2{Is isInternal == true?}
+        R2 -->|Yes| R3[Reject immediately with 403 Forbidden]
+        R2 -->|No / Omitted| R4[Force isInternal = false]
+    end
+
+    subgraph ServiceLayer["2. Service-Layer Ownership Guard"]
+        S1[Ticket lookup] --> S2{Does ticket.customer == req.user._id?}
+        S2 -->|No| S3[Reject with 403 Forbidden]
+        S2 -->|Yes| S4[Proceed to Database Operation]
+    end
+
+    subgraph DatabaseLayer["3. Unconditional Database Query Scoping"]
+        D1[Incoming Query] --> D2{req.user.role == 'customer'?}
+        D2 -->|Yes| D3[Hardcode filter: isInternal = false]
+        D2 -->|No| D4[Return all comments / notes]
+    end
+
+    subgraph AuditLayer["4. Audit Log Segregation"]
+        A1[Event Logged] --> A2[Tag isInternal: Boolean]
+        A2 --> A3[Customer Activity Endpoint filters out isInternal: true]
+    end
+```
+
+1. **Creation Rejection (Layer 1)**: If a customer attempts to send `{"isInternal": true}` in a comment payload, `commentService.js` throws `403 Forbidden` ("Customers cannot create internal notes").
+2. **Creation Role Sanitization (Layer 2)**: Even if a client bypasses schema validation, `finalIsInternal` is hard-forced to `false` for customers.
+3. **Query Isolation (Layer 3)**: When a customer calls `GET /api/tickets/:id/comments`, the Mongoose query unconditionally appends `{ isInternal: false }`. Even if a customer passes query parameters like `?isInternal=true`, the backend hardcodes `filter.isInternal = false`.
+4. **Audit Trail Masking (Layer 4)**: Audit entries generated by internal notes are tagged `isInternal: true`, ensuring that `GET /api/tickets/:id/activity` never displays internal note events in the customer's timeline.
+
+---
+
+### 13.3 Request Flow: Comment Creation & Retrieval
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Customer as Customer (Alice)
+    actor Agent as Support Agent
+    participant Route as Express Router (/api/tickets/:id/comments)
+    participant AuthMW as authenticate Middleware
+    participant Service as commentService.js
+    participant Audit as auditService.js
+    participant DB as MongoDB
+
+    Agent->>Route: POST /api/tickets/SUP-1001/comments { message: "Internal note", isInternal: true }
+    Route->>AuthMW: Verify Bearer JWT
+    AuthMW-->>Route: req.user (role: agent)
+    Route->>Service: createComment(ticketId, message, true, agentUser)
+    Service->>DB: Save Comment { isInternal: true, author: agentId }
+    Service->>Audit: logAction({ action: "COMMENT_ADDED", isInternal: true })
+    Audit->>DB: Save AuditLog { isInternal: true }
+    Service-->>Agent: HTTP 201 Created (Internal Note Saved)
+
+    Customer->>Route: GET /api/tickets/SUP-1001/comments
+    Route->>AuthMW: Verify Bearer JWT
+    AuthMW-->>Route: req.user (role: customer)
+    Route->>Service: getComments(ticketId, customerUser)
+    Note over Service: Detects customer role -> Enforces { ticket, isInternal: false }
+    Service->>DB: Query Comment.find({ ticket, isInternal: false })
+    DB-->>Service: Public comments only
+    Service-->>Customer: HTTP 200 OK (Zero Internal Notes Returned)
+```
+
+---
+
+### 13.4 Key Files & Modules in Stage 5
+
+| File Path | Responsibility |
+| :--- | :--- |
+| `server/src/models/Comment.js` | Schema linking `ticket` and `author` (User) with `message` and `isInternal` flag. Features compound indexes on `{ ticket: 1, isInternal: 1, createdAt: 1 }`. |
+| `server/src/models/AuditLog.js` | Immutable event log schema capturing `action`, `fieldChanged`, `oldValue`, `newValue`, and `isInternal` privacy flag. |
+| `server/src/services/auditService.js` | Service recording lifecycle actions (`CREATED`, `STATUS_UPDATED`, `ASSIGNED`, `PRIORITY_UPDATED`, `COMMENT_ADDED`) and providing privacy-filtered activity history. |
+| `server/src/services/commentService.js` | Business logic for comment creation (403 for customer internal note attempts, ownership verification) and privacy-isolated comment retrieval. |
+| `server/src/validations/commentValidation.js` | Express-validator rules for comment message length (1-2000 chars) and boolean `isInternal` parameters. |
+| `server/src/controllers/commentController.js` | HTTP endpoints for `POST /api/tickets/:id/comments`, `GET /api/tickets/:id/comments`, and `GET /api/tickets/:id/activity`. |
+| `server/tests/comments.test.js` | 10 automated integration tests verifying public replies, internal notes, query parameter bypass immunity, customer privacy isolation, and audit trail logging. |
+
+---
+
+### 13.5 API Reference: Comments & Activity Endpoints
+
+#### 1. `POST /api/tickets/:id/comments`
+- **Access**: Authenticated (Customers only on own tickets; Agents/Admins on any ticket)
+- **Request Body (Public Reply)**:
+```json
+{
+  "message": "We have verified the billing invoice and issued a credit."
+}
+```
+- **Request Body (Internal Note — Agents/Admins Only)**:
+```json
+{
+  "message": "Card transaction re_1234 refunded in Stripe dashboard.",
+  "isInternal": true
+}
+```
+- **Response (`201 Created`)**:
+```json
+{
+  "success": true,
+  "message": "Internal note added successfully",
+  "comment": {
+    "id": "67be8...",
+    "_id": "67be8...",
+    "ticket": "67be7...",
+    "author": {
+      "id": "67be1...",
+      "name": "Agent Smith",
+      "email": "agent@example.com",
+      "role": "agent"
+    },
+    "message": "Card transaction re_1234 refunded in Stripe dashboard.",
+    "isInternal": true,
+    "createdAt": "2026-10-26T08:30:00.000Z"
+  }
+}
+```
+- **Error Response (`403 Forbidden`)**: If a Customer sends `{"isInternal": true}`, returns `{ "success": false, "message": "Customers cannot create internal notes" }`.
+
+#### 2. `GET /api/tickets/:id/comments`
+- **Access**: Authenticated
+- **Behavior**:
+  - **Customers**: Unconditionally filtered by `{ isInternal: false }`.
+  - **Agents & Admins**: Returns both public comments and internal notes.
+
+#### 3. `GET /api/tickets/:id/activity`
+- **Access**: Authenticated
+- **Behavior**: Returns the chronological audit trail (`CREATED`, `ASSIGNED`, `STATUS_UPDATED`, `COMMENT_ADDED`). For customers, internal note actions are excluded.
+
+---
+
+### 13.6 Interview Questions & Detailed Answers
+
+#### Q1: Why is frontend-only conditional rendering (`isInternal && <InternalNote />`) dangerous for internal notes?
+> **Answer**:  
+> If an API returns all comments to the browser and relies on the React frontend to hide internal notes using `if (user.role !== 'customer')`, an attacker can simply inspect the raw JSON response in the browser's Network tab or console (`response.json()`) and read all private notes.  
+> Security must be enforced on the **server at the database query level**. In SupportFlow, the Mongoose query for customers hardcodes `{ isInternal: false }`, ensuring private data never leaves the server memory.
+
+#### Q2: How does SupportFlow prevent customers from viewing internal notes via query parameter manipulation (e.g. `GET /comments?isInternal=true`)?
+> **Answer**:  
+> In `commentService.getComments()`, the query filter is constructed programmatically on the server. If `currentUser.role === 'customer'`, the filter explicitly overwrites or sets `filter.isInternal = false` regardless of any query parameters passed in `req.query`. Request parameters are never passed directly to MongoDB query objects without sanitation.
+
+#### Q3: What is the advantage of maintaining an AuditLog collection versus storing change history inside an array on the Ticket document?
+> **Answer**:  
+> Storing history in an embedded array (`ticket.history.push(...)`) can lead to the MongoDB 16MB document size limit for long-lived tickets with hundreds of updates, and concurrent updates can encounter write conflict race conditions.  
+> Storing history in a dedicated, append-only `AuditLog` collection allows unbounded history, independent indexing on `createdAt` and `action`, clean pagination, and easy data isolation (such as applying `{ isInternal: false }` for customer timeline views).
+
+---
+
+### 13.7 Self-Study Hands-On Exercise (Stage 5)
+
+1. **Post a Public Reply & an Internal Note**:
+   Log in as an agent, obtain your token, and post both a public reply and an internal note to a ticket:
+   ```bash
+   # Public Reply
+   curl -X POST http://localhost:5000/api/tickets/YOUR_TICKET_ID/comments \
+     -H "Content-Type: application/json" \
+     -H "Authorization: Bearer YOUR_AGENT_TOKEN" \
+     -d '{"message":"Public troubleshooting response","isInternal":false}'
+
+   # Internal Note
+   curl -X POST http://localhost:5000/api/tickets/YOUR_TICKET_ID/comments \
+     -H "Content-Type: application/json" \
+     -H "Authorization: Bearer YOUR_AGENT_TOKEN" \
+     -d '{"message":"CONFIDENTIAL: Customer requested fee waiver","isInternal":true}'
+   ```
+
+2. **Verify Customer Privacy**:
+   Query the same ticket's comments using the customer's token:
+   ```bash
+   curl -X GET http://localhost:5000/api/tickets/YOUR_TICKET_ID/comments \
+     -H "Authorization: Bearer YOUR_CUSTOMER_TOKEN"
+   ```
+   *Verify that ONLY the public reply is returned and the internal note is completely absent.*
+
+3. **Verify Audit Trail**:
+   Query the activity timeline:
+   ```bash
+   curl -X GET http://localhost:5000/api/tickets/YOUR_TICKET_ID/activity \
+     -H "Authorization: Bearer YOUR_AGENT_TOKEN"
+   ```
+   *Verify that you see the chronological timeline of actions: CREATED, STATUS_UPDATED, and COMMENT_ADDED.*
+
+
+

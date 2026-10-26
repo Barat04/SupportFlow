@@ -60,9 +60,11 @@ app.get('/api/health', (req, res) => {
   });
 });
 
-// 6. Placeholder for upcoming Stage 3 & 4 routes:
-// app.use('/api/auth', authRoutes);
-// app.use('/api/tickets', ticketRoutes);
+// 6. Application Routes
+const authRoutes = require('./routes/authRoutes');
+const ticketRoutes = require('./routes/ticketRoutes');
+app.use('/api/auth', authRoutes);
+app.use('/api/tickets', ticketRoutes);
 // app.use('/api/users', userRoutes);
 
 // 7. 404 Handler for undefined routes
